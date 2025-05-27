@@ -12,14 +12,12 @@ class FileTransferClient:
         self.s = None
         self.download_dir = download_dir 
         
-        # Define commands for clarity (matching server)
         self.UPLOAD_PRIVATE_COMMAND = "UPLOAD_PRIVATE"
         self.DOWNLOAD_SERVER_PUBLIC_COMMAND = "DOWNLOAD_SERVER_PUBLIC"
         self.UPLOAD_FOR_SHARING_COMMAND = "UPLOAD_FOR_SHARE"
         self.LIST_SHARED_COMMAND = "LIST_SHARED"
         self.DOWNLOAD_SHARED_COMMAND = "DOWNLOAD_SHARED"
-
-        # Server response commands
+        
         self.DOWNLOAD_START_RESPONSE = "DOWNLOAD_START"
         self.FILE_NOT_FOUND_RESPONSE = "FILE_NOT_FOUND"
         self.SHARED_LIST_RESPONSE = "SHARED_LIST"
@@ -92,8 +90,8 @@ class FileTransferClient:
 
         try:
             encoded_filename = os.path.basename(filename).encode('utf-8')
-            command_and_data = f"{command}{self.separator}{encoded_filename.decode('latin-1')}{self.separator}{filesize}".encode('latin-1')
-            self.s.sendall(command_and_data) # type: ignore
+            command_and_data = f"{command}{self.separator}{encoded_filename.decode('utf-8')}{self.separator}{filesize}".encode('utf-8')
+            self.s.sendall(command_and_data)  # Send command and metadata only once
 
             progress = tqdm.tqdm(range(filesize), f"Sending {os.path.basename(filename)}", unit="B", unit_scale=True, unit_divisor=1024)
             with open(filename, "rb") as f:
@@ -116,24 +114,26 @@ class FileTransferClient:
             self.close_connection()
         return False
 
-    def _receive_file_from_server(self, remote_filename: str):
-        """Helper to receive file data from the server after metadata is confirmed."""
-        try:
-            # Send the download command and filename
-            command_and_data = f"{self.DOWNLOAD_SHARED_COMMAND}{self.separator}{remote_filename}".encode('latin-1')
-            self.s.sendall(command_and_data)
+    def _receive_file_from_server(self, remote_filename: str, command: str):
+        # Helper to receive file data from the server after sending the download command once.
+        if not self.connect():
+            return False
 
-            # Receive server's response (metadata for download or error)
-            response = self.s.recv(self.buffer_size).decode('latin-1')
+        try:
+            # Send the download command and filename once
+            command_and_data = f"{command}{self.separator}{remote_filename}".encode('utf-8')
+            print(f"Sending download command: {command_and_data.decode('utf-8')}")
+            self.s.sendall(command_and_data)   
+
+            response = self.s.recv(self.buffer_size).decode('utf-8')
             parts = response.split(self.separator)
+            command_response = parts[0]
             
-            command = parts[0]
-            
-            if command == self.DOWNLOAD_START_RESPONSE:
+            if command_response == self.DOWNLOAD_START_RESPONSE:
                 filename_encoded = parts[1]
                 filesize_str = parts[2]
                 
-                actual_filename = filename_encoded.encode('latin-1').decode('utf-8')
+                actual_filename = filename_encoded.encode('utf-8').decode('utf-8')
                 filesize = int(filesize_str)
 
                 local_save_path = os.path.join(self.download_dir, os.path.basename(actual_filename)) 
@@ -158,11 +158,11 @@ class FileTransferClient:
                     print(f"Warning: Download of '{actual_filename}' incomplete. Expected {filesize} bytes, got {bytes_received}.")
                 return True
             
-            elif command == self.FILE_NOT_FOUND_RESPONSE:
+            elif command_response == self.FILE_NOT_FOUND_RESPONSE:
                 print(f"Error: File '{parts[1]}' not found on the server.")
                 return False
             else:
-                print(f"Server responded with an unknown command: {command}")
+                print(f"Server responded with an unknown command: {command_response}")
                 return False
 
         except BrokenPipeError:
@@ -189,17 +189,8 @@ class FileTransferClient:
         if remote_filename.lower() == 'q':
             print("Exiting download selection.")
             return
-
-        if not self.connect():
-            return
         
-        # Send the command to download a file from server's public folder
-        command_and_data = f"{self.DOWNLOAD_SERVER_PUBLIC_COMMAND}{self.separator}{remote_filename}".encode('latin-1')
-        self.s.sendall(command_and_data)
-        
-        # Reuse receive file logic
-        self._receive_file_from_server(remote_filename)
-
+        self._receive_file_from_server(remote_filename, self.DOWNLOAD_SERVER_PUBLIC_COMMAND)
 
     def upload_file_for_sharing(self):
         file_info = self.get_local_filename_from_user("Enter the filename to upload for sharing")
@@ -213,17 +204,16 @@ class FileTransferClient:
             return
         
         try:
-            # Request list of shared files
-            self.s.sendall(self.LIST_SHARED_COMMAND.encode('latin-1'))
+            self.s.sendall(self.LIST_SHARED_COMMAND.encode('utf-8'))
             
-            response = self.s.recv(self.buffer_size).decode('latin-1')
-            parts = response.split(self.separator, 1) # Split only once
+            response = self.s.recv(self.buffer_size).decode('utf-8')
+            parts = response.split(self.separator, 1)
 
             command = parts[0]
 
             if command == self.SHARED_LIST_RESPONSE:
                 if len(parts) > 1:
-                    shared_files = parts[1].split("|||") # Use the sub-separator
+                    shared_files = parts[1].split("|||")
                     print("\n--- Available Shared Files ---")
                     for i, fname in enumerate(shared_files):
                         print(f"{i+1}. {fname}")
@@ -235,21 +225,18 @@ class FileTransferClient:
                             print("Exiting shared file download.")
                             break
                         if choice_str == 'l':
-                            # Re-requesting the list means new connection
                             self.close_connection()
-                            self.list_and_download_shared_files() 
-                            return # Exit current function after re-initiating
-                        
+                            self.list_and_download_shared_files()
+                            return
                         try:
                             choice_idx = int(choice_str) - 1
                             if 0 <= choice_idx < len(shared_files):
                                 file_to_download = shared_files[choice_idx]
                                 print(f"Attempting to download '{file_to_download}'...")
-                                # Close current connection and open new one for download
-                                self.close_connection() 
-                                if self.connect(): # Reconnect before sending download command
-                                    self._receive_file_from_server(file_to_download)
-                                break # Exit after download attempt
+                                self.close_connection()
+                                if self.connect():
+                                    self._receive_file_from_server(file_to_download, self.DOWNLOAD_SHARED_COMMAND)
+                                break
                             else:
                                 print("Invalid number. Please try again.")
                         except ValueError:
@@ -280,8 +267,8 @@ class FileTransferClient:
             print("\n--- File Transfer Client ---")
             print("1. Upload a file (Private to Server)")
             print("2. Download a file (From Server's Public Folder)")
-            print("3. Upload a file (For Sharing with Other Clients)") # New
-            print("4. List & Download Shared Files") # New
+            print("3. Upload a file (For Sharing with Other Clients)")
+            print("4. List & Download Shared Files")
             print("q. Quit")
             choice = input("Enter your choice: ").strip().lower()
 
@@ -289,9 +276,9 @@ class FileTransferClient:
                 self.upload_private_file()
             elif choice == '2':
                 self.download_server_public_file()
-            elif choice == '3': # New
+            elif choice == '3':
                 self.upload_file_for_sharing()
-            elif choice == '4': # New
+            elif choice == '4':
                 self.list_and_download_shared_files()
             elif choice == 'q':
                 print("Exiting client.")
@@ -299,10 +286,10 @@ class FileTransferClient:
             else:
                 print("Invalid choice. Please try again.")
 
-# --- Main execution block ---
 if __name__ == "__main__":
     SERVER_HOST = "127.0.0.1"
     SERVER_PORT = 5000
 
     client = FileTransferClient(SERVER_HOST, SERVER_PORT)
     client.start_interactive_session()
+

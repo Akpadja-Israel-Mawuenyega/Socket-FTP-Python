@@ -102,7 +102,7 @@ You will typically need two or more separate terminal windows (or command prompt
 
 * **1 (Upload a file \- Private to Server):**  
   * Uploads a file from your local machine to the server's uploads/ directory.  
-  * **Usage:** Place the file (e.g., my\_private\_doc.txt) in the *same directory* as client.py, then choose option 1 and enter its name.  
+  * **Usage:** Choose option 1 and enter its name (i.e it's exact path).  
 * **2 (Download a file \- From Server's Public Folder):**  
   * Downloads a file from the server's shared\_files/ directory.  
   * **Preparation:** Place the file you want to download (e.g., public\_report.pdf) directly into the shared\_files/ directory on the server machine.  

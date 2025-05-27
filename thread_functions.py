@@ -36,7 +36,8 @@ class ClientHandler(threading.Thread):
 
     def run(self):
         try:
-            initial_data = self.client_socket.recv(self.buffer_size).decode('latin-1')
+            initial_data = self.client_socket.recv(self.buffer_size).decode('utf-8')
+            print(f"Received data: {initial_data}")
             parts = initial_data.split(self.separator, 2)
 
             command = parts[0]
@@ -45,7 +46,7 @@ class ClientHandler(threading.Thread):
                 filename_encoded = parts[1]
                 filesize_str = parts[2]
                 
-                filename = filename_encoded.encode('latin-1').decode('utf-8')
+                filename = filename_encoded.encode('utf-8').decode('utf-8')
                 filesize = int(filesize_str)
 
                 filepath = os.path.join(self.upload_dir, os.path.basename(filename))
@@ -61,7 +62,7 @@ class ClientHandler(threading.Thread):
                 filename_encoded = parts[1]
                 filesize_str = parts[2]
                 
-                filename = filename_encoded.encode('latin-1').decode('utf-8')
+                filename = filename_encoded.encode('utf-8').decode('utf-8')
                 filesize = int(filesize_str)
 
                 filepath = os.path.join(self.shared_uploads_dir, os.path.basename(filename))
@@ -79,7 +80,7 @@ class ClientHandler(threading.Thread):
 
             else:
                 print(f"[Client {self.address}] Unknown command received: {command}")
-                self.client_socket.sendall("UNKNOWN_COMMAND".encode('latin-1'))
+                self.client_socket.sendall("UNKNOWN_COMMAND".encode('utf-8'))
 
         except ConnectionResetError:
             print(f"[Client {self.address}] Disconnected unexpectedly.")
@@ -128,7 +129,7 @@ class ClientHandler(threading.Thread):
 
         if not os.path.exists(filepath) or not os.path.isfile(filepath):
             print(f"[Client {self.address}] Requested '{requested_filename}' from '{source_directory}' but it was not found.")
-            response = f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('latin-1')
+            response = f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('utf-8')
             client_socket.sendall(response)
             return
 
@@ -136,7 +137,7 @@ class ClientHandler(threading.Thread):
             filesize = os.path.getsize(filepath)
             
             encoded_filename = os.path.basename(requested_filename).encode('utf-8')
-            response = f"{self.DOWNLOAD_START_RESPONSE}{self.separator}{encoded_filename.decode('latin-1')}{self.separator}{filesize}".encode('latin-1')
+            response = f"{self.DOWNLOAD_START_RESPONSE}{self.separator}{encoded_filename.decode('utf-8')}{self.separator}{filesize}".encode('utf-8')
             client_socket.sendall(response)
 
             print(f"[Client {self.address}] Serving '{requested_filename}' ({filesize} bytes) from '{source_directory}'...")
@@ -154,7 +155,7 @@ class ClientHandler(threading.Thread):
 
         except FileNotFoundError: # Should be caught by exists check, but good fallback
             print(f"[Client {self.address}] Error: File '{requested_filename}' disappeared during serving.")
-            client_socket.sendall(f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('latin-1'))
+            client_socket.sendall(f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('utf-8'))
         except OSError as e:
             print(f"[Client {self.address}] An OS error occurred while serving file: {e}")
         except Exception as e:
@@ -166,7 +167,7 @@ class ClientHandler(threading.Thread):
             shared_files = [f for f in os.listdir(self.shared_uploads_dir) if os.path.isfile(os.path.join(self.shared_uploads_dir, f))]
             
             if not shared_files:
-                response = self.NO_FILES_SHARED_RESPONSE.encode('latin-1')
+                response = self.NO_FILES_SHARED_RESPONSE.encode('utf-8')
                 client_socket.sendall(response)
                 print(f"[Client {self.address}] No shared files to list.")
                 return
@@ -175,10 +176,10 @@ class ClientHandler(threading.Thread):
             # Using a character unlikely to be in filenames, e.g., '|||'
             files_list_str = "|||".join(shared_files)
             
-            response = f"{self.SHARED_LIST_RESPONSE}{self.separator}{files_list_str}".encode('latin-1')
+            response = f"{self.SHARED_LIST_RESPONSE}{self.separator}{files_list_str}".encode('utf-8')
             client_socket.sendall(response)
             print(f"[Client {self.address}] Sent list of shared files.")
 
         except Exception as e:
             print(f"[Client {self.address}] Error listing shared files: {e}")
-            client_socket.sendall("SERVER_ERROR".encode('latin-1')) # Generic error response
+            client_socket.sendall("SERVER_ERROR".encode('utf-8')) # Generic error response
