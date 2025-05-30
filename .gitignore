@@ -1,5 +1,6 @@
 /__pycache__
-/downloads
+/downloads 
 /shared_files
 /uploads
-/shared_uploads
+/shared_uploads 
+/.vscode  
