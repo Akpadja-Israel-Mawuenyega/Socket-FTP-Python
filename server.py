@@ -3,7 +3,7 @@ import os
 import sys
 import threading
 
-from thread_functions import ClientHandler 
+from thread_functions import ClientHandler # Allows client multithreading. These clients communicate via IPC
 
 class FileTransferServer:
     def __init__(self, host: str, port: int, buffer_size: int = 4096, separator: str = "<SEPARATOR>", 

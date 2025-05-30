@@ -4,6 +4,7 @@ import os
 import sys
 
 class FileTransferClient:
+    # Class initialization method
     def __init__(self, host: str, port: int, buffer_size: int = 4096, separator: str = "<SEPARATOR>", download_dir: str = "downloads"):
         self.host = host
         self.port = port
@@ -84,7 +85,7 @@ class FileTransferClient:
                 print(f"An unexpected error occurred during file validation: {e}. Please try again.\r\n")
 
     def _send_file_to_server(self, command: str, filename: str, filesize: int):
-        """Helper to send file metadata and then file data to the server."""
+        # Helper to send file metadata and then file data to the server.
         if not self.connect():
             return False
 

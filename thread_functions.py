@@ -4,12 +4,12 @@ import tqdm
 import os
 import sys
 
-class ClientHandler(threading.Thread):
-    """
-    A thread class to handle individual client connections for file transfer.
-    Now supports uploads to a private folder, uploads to a shared folder,
-    listing shared files, and downloading shared files.
-    """
+class ClientHandler(threading.Thread): 
+    # A thread class to handle individual client connections for file transfer.
+    # Supports uploads to a private folder, uploads to a shared folder,
+    # listing shared files, and downloading shared files.
+    
+    # Class initializer method
     def __init__(self, client_socket: socket.socket, address: tuple, server_config: dict):
         super().__init__()
         self.client_socket = client_socket
@@ -18,19 +18,19 @@ class ClientHandler(threading.Thread):
         self.separator = server_config['separator']
         self.upload_dir = server_config['upload_dir']          # For private uploads
         self.shared_files_dir = server_config['shared_files_dir'] # For server's public files
-        self.shared_uploads_dir = server_config['shared_uploads_dir'] # New: For client-shared files
+        self.shared_uploads_dir = server_config['shared_uploads_dir']  # For client-shared files
         
         # Command constants from server config
         self.UPLOAD_PRIVATE_COMMAND = server_config['UPLOAD_PRIVATE_COMMAND']
         self.DOWNLOAD_SERVER_PUBLIC_COMMAND = server_config['DOWNLOAD_SERVER_PUBLIC_COMMAND']
-        self.UPLOAD_FOR_SHARING_COMMAND = server_config['UPLOAD_FOR_SHARING_COMMAND'] # New
-        self.LIST_SHARED_COMMAND = server_config['LIST_SHARED_COMMAND']             # New
-        self.DOWNLOAD_SHARED_COMMAND = server_config['DOWNLOAD_SHARED_COMMAND']     # New
+        self.UPLOAD_FOR_SHARING_COMMAND = server_config['UPLOAD_FOR_SHARING_COMMAND'] 
+        self.LIST_SHARED_COMMAND = server_config['LIST_SHARED_COMMAND']             
+        self.DOWNLOAD_SHARED_COMMAND = server_config['DOWNLOAD_SHARED_COMMAND']     
         
         self.DOWNLOAD_START_RESPONSE = server_config['DOWNLOAD_START_RESPONSE']
         self.FILE_NOT_FOUND_RESPONSE = server_config['FILE_NOT_FOUND_RESPONSE']
-        self.SHARED_LIST_RESPONSE = server_config['SHARED_LIST_RESPONSE']           # New
-        self.NO_FILES_SHARED_RESPONSE = server_config['NO_FILES_SHARED_RESPONSE']   # New
+        self.SHARED_LIST_RESPONSE = server_config['SHARED_LIST_RESPONSE']           
+        self.NO_FILES_SHARED_RESPONSE = server_config['NO_FILES_SHARED_RESPONSE']   
 
         self.daemon = True 
 
@@ -95,7 +95,7 @@ class ClientHandler(threading.Thread):
             self.client_socket.close()
 
     def _receive_file_data(self, client_socket: socket.socket, filepath: str, filesize: int, display_filename: str):
-        """Helper method to receive file data into a specified path."""
+        # Helper method to receive file data into a specified path.
         try:
             # Use 'leave=True' for server-side tqdm if you want logs to stay
             # Use 'leave=False' to clear the bar after completion
@@ -124,7 +124,7 @@ class ClientHandler(threading.Thread):
             print(f"[Client {self.address}] An error occurred during file data reception: {e}")
 
     def _serve_file_to_client(self, client_socket: socket.socket, requested_filename: str, source_directory: str):
-        """Helper method to send a requested file from a specified source directory to the client."""
+        # Helper method to send a requested file from a specified source directory to the client.
         filepath = os.path.join(source_directory, os.path.basename(requested_filename))
 
         if not os.path.exists(filepath) or not os.path.isfile(filepath):
@@ -162,7 +162,7 @@ class ClientHandler(threading.Thread):
             print(f"[Client {self.address}] An unexpected error occurred during file serving: {e}")
 
     def _handle_list_shared_files(self, client_socket: socket.socket):
-        """Helper method to list files in the shared_uploads directory."""
+        # Helper method to list files in the shared_uploads directory.
         try:
             shared_files = [f for f in os.listdir(self.shared_uploads_dir) if os.path.isfile(os.path.join(self.shared_uploads_dir, f))]
             
