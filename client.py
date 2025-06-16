@@ -288,7 +288,7 @@ class FileTransferClient:
                 print("Invalid choice. Please try again.")
 
 if __name__ == "__main__":
-    SERVER_HOST = "127.0.0.1"
+    SERVER_HOST = "192.168.0.2"
     SERVER_PORT = 5000
 
     client = FileTransferClient(SERVER_HOST, SERVER_PORT)

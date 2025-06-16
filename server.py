@@ -101,7 +101,7 @@ class FileTransferServer:
             print("Server socket closed.")
 
 if __name__ == "__main__":
-    SERVER_HOST = "127.0.0.1"
+    SERVER_HOST = "0.0.0.0"
     SERVER_PORT = 5000
 
     server = FileTransferServer(SERVER_HOST, SERVER_PORT)
