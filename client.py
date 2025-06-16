@@ -3,6 +3,8 @@ import tqdm
 import os
 import sys
 import ssl
+import requests
+from urllib.parse import urlparse
 
 class FileTransferClient:
     def __init__(self, host: str, port: int, buffer_size: int = 4096, separator: str = "<SEPARATOR>", 
@@ -44,6 +46,7 @@ class FileTransferClient:
         try:
             self.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             self.ssl_context.load_verify_locations(self.server_cert)
+            self.ssl_context.check_hostname = False
             print(f"SSL Context initialized with trusted cert: {self.server_cert}")
         except FileNotFoundError:
             print(f"Error: Server certificate file not found. Ensure '{self.server_cert}' exists in the client directory.")
@@ -349,10 +352,44 @@ class FileTransferClient:
                 break
             else:
                 print("Invalid choice. Please try again.")
+                
+def _get_ngrok_public_address():
+        # Function to get the public address of the ngrok server
+        ngrok_api_url = "http://127.0.0.1:4040/api/tunnels"
+        try:
+            response = requests.get(ngrok_api_url) 
+            response.raise_for_status()
+            tunnels_data = response.json()
+            
+            for tunnel in tunnels_data['tunnels']:
+                if tunnel['proto'] == 'tcp':
+                    public_url = tunnel['public_url']
+                    parsed_url = urlparse(public_url)
+                    return parsed_url.hostname, parsed_url.port
+            
+            print("Error: No TCP tunnet found in ngrok API response.")
+            return None, None
+        
+        except requests.exceptions.ConnectionError:
+            print("Error: ngrok web interface not found. Is ngrok running?")
+            print("Please ensure ngrok is running in a separate terminal: ngrok tcp 8080")
+            return None, None
+        except requests.exceptions.RequestException as e:
+           print(f"Error querying ngrok API: {e}")
+           return None, None                    
 
 if __name__ == "__main__":
-    SERVER_HOST = "2.tcp.eu.ngrok.io"
-    SERVER_PORT = 18339
+    detected_host, detected_port = _get_ngrok_public_address()
+
+    if detected_host and detected_port:
+        SERVER_HOST = detected_host
+        SERVER_PORT = detected_port
+        print(f"Detected ngrok tunnel: {SERVER_HOST}:{SERVER_PORT}")
+    else:
+        print("Could not automatically detect ngrok tunnel. Falling back to default settings.")
+        SERVER_HOST = "2.tcp.eu.ngrok.io"
+        SERVER_PORT = 18339                 
+        print(f"Using fallback server: {SERVER_HOST}:{SERVER_PORT}")
 
     client = FileTransferClient(SERVER_HOST, SERVER_PORT, server_cert='server.crt')
     client.start_interactive_session()
