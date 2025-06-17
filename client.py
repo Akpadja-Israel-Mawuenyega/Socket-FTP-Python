@@ -5,17 +5,24 @@ import sys
 import ssl
 import requests
 from urllib.parse import urlparse
+import time
+
+from client_auth import ClientAuthHandler
 
 class FileTransferClient:
-    def __init__(self, host: str, port: int, buffer_size: int = 4096, separator: str = "<SEPARATOR>", 
-                 download_dir: str = "downloads", server_cert: str = 'server.crt'): # Added server_cert path
+    def __init__(self, host: str, port: int, buffer_size: int = 4096, separator: str = "<SEPARATOR>",
+                 download_dir: str = "downloads", server_cert: str = 'server.crt',
+                 client_cert: str = None, client_key: str = None):
         self.host = host
         self.port = port
         self.buffer_size = buffer_size
         self.separator = separator
-        self.s = None 
+        self.s = None
+        self.secure_socket = None
         self.download_dir = download_dir
-        self.server_cert = server_cert 
+        self.server_cert = server_cert
+        self.client_cert = client_cert   # Optional but use if you want mTLS
+        self.client_key = client_key     # Optional but use if you want mTLS
 
         # Command constants
         self.UPLOAD_PRIVATE_COMMAND = "UPLOAD_PRIVATE"
@@ -24,13 +31,43 @@ class FileTransferClient:
         self.LIST_SHARED_COMMAND = "LIST_SHARED"
         self.DOWNLOAD_SHARED_COMMAND = "DOWNLOAD_SHARED"
 
+        # Authentication Commands
+        self.REGISTER_COMMAND = "REGISTER"
+        self.LOGIN_COMMAND = "LOGIN"
+        self.LOGOUT_COMMAND = "LOGOUT"
+        self.MAKE_PUBLIC_ADMIN_COMMAND = "MAKE_PUBLIC_ADMIN"
+
+        # Response constants
         self.DOWNLOAD_START_RESPONSE = "DOWNLOAD_START"
         self.FILE_NOT_FOUND_RESPONSE = "FILE_NOT_FOUND"
         self.SHARED_LIST_RESPONSE = "SHARED_LIST"
         self.NO_FILES_SHARED_RESPONSE = "NO_FILES_SHARED"
+        self.UPLOAD_COMPLETE_RESPONSE = "UPLOAD_COMPLETE"
+        self.UPLOAD_INCOMPLETE_RESPONSE = "UPLOAD_INCOMPLETE"
+        self.PONG_RESPONSE = "PONG"
+
+        # Authentication Responses
+        self.REGISTER_SUCCESS_RESPONSE = "REGISTER_SUCCESS"
+        self.REGISTER_FAILED_RESPONSE = "REGISTER_FAILED"
+        self.LOGIN_SUCCESS_RESPONSE = "LOGIN_SUCCESS"
+        self.LOGIN_FAILED_RESPONSE = "LOGIN_FAILED"
+        self.LOGOUT_SUCCESS_RESPONSE = "LOGOUT_SUCCESS"
+        self.AUTHENTICATION_REQUIRED_RESPONSE = "AUTH_REQUIRED"
+        self.PERMISSION_DENIED_RESPONSE = "PERMISSION_DENIED"
+        self.ADMIN_FILE_MAKE_PUBLIC_SUCCESS = "ADMIN_PUBLIC_SUCCESS"
+        self.ADMIN_FILE_MAKE_PUBLIC_FAILED = "ADMIN_PUBLIC_FAILED"
+        self.INVALID_SESSION_RESPONSE = "INVALID_SESSION"
+
 
         self._create_download_directory()
-        self._setup_ssl_context() # New: Setup SSL context
+        self._setup_ssl_context()
+
+        # Authentication State
+        self.session_id = None
+        self.username = None
+        self.user_role = None
+
+        self.auth_handler = ClientAuthHandler(self)
 
     def _create_download_directory(self):
         if not os.path.exists(self.download_dir):
@@ -42,343 +79,392 @@ class FileTransferClient:
                 sys.exit(1)
 
     def _setup_ssl_context(self):
-        # Helper method to reate and configures the SSLContext for the client.
         try:
             self.ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
             self.ssl_context.load_verify_locations(self.server_cert)
+            if self.client_cert and self.client_key:
+                self.ssl_context.load_cert_chain(certfile=self.client_cert, keyfile=self.client_key)
             self.ssl_context.check_hostname = False
-            print(f"SSL Context initialized with trusted cert: {self.server_cert}")
-        except FileNotFoundError:
-            print(f"Error: Server certificate file not found. Ensure '{self.server_cert}' exists in the client directory.")
+            print(f"SSL Context initialized. Trusting server cert: {self.server_cert}")
+        except FileNotFoundError as e:
+            print(f"Error: SSL certificate file not found: {e}. Ensure '{self.server_cert}' exists.")
             sys.exit(1)
         except ssl.SSLError as e:
-            print(f"Error setting up SSL client context: {e}")
-            print("Ensure the server's certificate is valid.")
+            print(f"Error setting up SSL context: {e}")
+            print("Ensure your certificate files are valid and not corrupted.")
             sys.exit(1)
 
-    def connect(self) -> bool:
-        if self.s:
-            self.close_connection()
-
-        print(f"Attempting to connect securely to {self.host}:{self.port}...")
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.s = self.ssl_context.wrap_socket(sock, server_hostname=self.host)
-            
-            self.s.connect((self.host, self.port))
-            print("Successfully connected securely to the server.")
-            return True
-        except ssl.SSLError as e:
-            print(f"Error: SSL/TLS connection failed: {e}")
-            print("Possible reasons:")
-            print(f" - Server's certificate is invalid, expired, or '{self.server_cert}' is not found/corrupt.")
-            print(f" - Common Name (CN) in server.crt might not match the configured SERVER_HOST ('{self.host}').")
-            print("   (e.g., if you generated the cert with a local IP, but are using a DDNS hostname).")
-            print("   For testing (NOT SECURE), consider setting `ssl_context.check_hostname = False` in client.py.")
-            return False
-        except ConnectionRefusedError:
-            print(f"Error: Connection refused. Is the server running on {self.host}:{self.port}?")
-            print("   Check server status, router port forwarding, and DDNS update.")
-            return False
-        except socket.gaierror:
-            print(f"Error: Host '{self.host}' could not be resolved. Check the hostname or internet connection.")
-            return False
-        except socket.timeout:
-            print(f"Error: Connection attempt timed out to {self.host}:{self.port}. Server might be down or unreachable.")
-            return False
-        except Exception as e:
-            print(f"An unexpected error occurred during connection: {e}")
-            return False
-
-    def close_connection(self):
-        if self.s:
+    def _connect(self, attempt_redetection=False):
+        if self.secure_socket:
             try:
-                # Proper shutdown for SSL sockets
-                self.s.shutdown(socket.SHUT_RDWR)
-            except OSError as e:
-                if e.errno != 107: # 107 is 'Transport endpoint is not connected'
-                    print(f"Warning: Error during SSL shutdown: {e}")
-            print("Closing connection...")
-            self.s.close()
-            self.s = None
-            print("Connection closed.")
-
-    def get_local_filename_from_user(self, prompt: str) -> tuple[str, int] | None:
-        while True:
-            user_input = input(f"{prompt} (or 'q' to quit): ")
-            if user_input.lower() == 'q':
-                print("Exiting file selection.")
-                return None
-
-            try:
-                if not os.path.exists(user_input):
-                    print(f"Error: File '{user_input}' not found. Please try again.\r\n")
-                    continue
-                if not os.path.isfile(user_input):
-                    print(f"Error: '{user_input}' is a directory, not a file. Please enter a file path.\r\n")
-                    continue
-                filesize = os.path.getsize(user_input)
-                print(f"Selected file: '{user_input}' (Size: {filesize} bytes.)")
-                return user_input, filesize
-            except OSError as e:
-                print(f"An OS error occurred with '{user_input}': {e}. Please try again.\r\n")
-            except Exception as e:
-                print(f"An unexpected error occurred during file validation: {e}. Please try again.\r\n")
-
-    def _send_file_to_server(self, command: str, filename: str, filesize: int):
-        if not self.connect():
-            return False
-
-        try:
-            encoded_filename = os.path.basename(filename).encode('utf-8')
-            command_and_data = f"{command}{self.separator}{encoded_filename.decode('utf-8')}{self.separator}{filesize}".encode('utf-8')
-            self.s.sendall(command_and_data)
-
-            ack = self.s.recv(self.buffer_size).decode('utf-8')
-            if ack != "READY_FOR_FILE_DATA":
-                print(f"Server not ready to receive file data. Response: {ack}")
-                return False
-
-            progress = tqdm.tqdm(range(filesize), f"Sending {os.path.basename(filename)}", unit="B", unit_scale=True, unit_divisor=1024)
-            with open(filename, "rb") as f:
-                while True:
-                    bytes_read = f.read(self.buffer_size)
-                    if not bytes_read:
-                        break
-                    self.s.sendall(bytes_read)
-                    progress.update(len(bytes_read))
-            progress.close()
-            print(f"File '{filename}' sent successfully.")
-            
-            final_server_ack = self.s.recv(self.buffer_size).decode('utf-8')
-            print(f"Server final response: {final_server_ack}")
-
-            return True
-        except BrokenPipeError:
-            print("Error: Connection lost to the server (Broken pipe) during send.")
-        except ConnectionResetError:
-            print("Error: Connection reset by peer. Server might have closed the connection unexpectedly during send.")
-        except ssl.SSLError as e:
-            print(f"Error during SSL communication while sending file: {e}")
-        except Exception as e:
-            print(f"An unexpected error occurred during file transfer (send): {e}")
-        finally:
-            self.close_connection()
-        return False
-
-    def _receive_file_from_server(self, remote_filename: str, command: str):
-        if not self.connect():
-            return False
-
-        try:
-            # Send the download command and filename once
-            command_and_data = f"{command}{self.separator}{remote_filename}".encode('utf-8')
-            print(f"Sending download command: {command_and_data.decode('utf-8')}")
-            self.s.sendall(command_and_data)
-
-            response = self.s.recv(self.buffer_size).decode('utf-8')
-            parts = response.split(self.separator)
-            command_response = parts[0]
-
-            if command_response == self.DOWNLOAD_START_RESPONSE:
-                filename_encoded = parts[1]
-                filesize_str = parts[2]
-
-                actual_filename = filename_encoded.encode('utf-8').decode('utf-8')
-                filesize = int(filesize_str)
-
-                local_save_path = os.path.join(self.download_dir, os.path.basename(actual_filename))
-
-                print(f"Receiving '{actual_filename}' ({filesize} bytes) from server...")
-
-                # Send acknowledgment that client is ready to receive file data
-                self.s.sendall(b"READY_TO_RECEIVE_FILE_DATA")
-
-                progress = tqdm.tqdm(range(filesize), f"Downloading {actual_filename}", unit="B", unit_scale=True, unit_divisor=1024)
-                with open(local_save_path, "wb") as f:
-                    bytes_received = 0
-                    while bytes_received < filesize:
-                        bytes_read = self.s.recv(self.buffer_size)
-                        if not bytes_read:
-                            break # Connection closed prematurely or no more data
-                        f.write(bytes_read)
-                        bytes_received += len(bytes_read)
-                        progress.update(len(bytes_read))
-                progress.close()
-
-                if bytes_received == filesize:
-                    print(f"Successfully downloaded '{actual_filename}' to '{local_save_path}'.")
-                    # Send a final acknowledgment to the server
-                    self.s.sendall(b"FILE_RECEIVED_OK")
+                self.secure_socket.sendall(b"PING")
+                pong_response = self.secure_socket.recv(self.buffer_size).decode('utf-8')
+                if pong_response == self.PONG_RESPONSE:
                     return True
                 else:
-                    print(f"Warning: Download of '{actual_filename}' incomplete. Expected {filesize} bytes, got {bytes_received}.")
-                    self.s.sendall(b"FILE_RECEIVED_INCOMPLETE")
-                    return False
+                    print(f"Ping check failed: Expected '{self.PONG_RESPONSE}', but received '{pong_response}'. Reconnecting...")
+                    self._close_connection()
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError, socket.error) as e:
+                print(f"Existing connection lost during PING check: {e}. Attempting to reconnect...")
+                self._close_connection()
+            except socket.timeout:
+                print("Existing connection timed out during PING check. Attempting to reconnect...")
+                self._close_connection()
+            except Exception as e:
+                print(f"An unexpected error occurred during PING check: {e}. Attempting to reconnect...")
+                self._close_connection()
 
-            elif command_response == self.FILE_NOT_FOUND_RESPONSE:
-                print(f"Error: File '{parts[1]}' not found on the server.")
-                return False
-            else:
-                print(f"Server responded with an unknown command: {command_response}")
-                return False
+        for attempt in range(3):
+            try:
+                self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.secure_socket = self.ssl_context.wrap_socket(self.s, server_hostname=self.host)
+                self.secure_socket.connect((self.host, self.port))
+                print(f"[*] Connected to {self.host}:{self.port} (SSL/TLS)")
+                return True
+            except ConnectionRefusedError:
+                print(f"[-] Connection refused for {self.host}:{self.port}. Server might not be running or address is incorrect.")
+            except ssl.SSLError as e:
+                print(f"[-] SSL/TLS Handshake failed for {self.host}:{self.port}: {e}. Check server certificate and client trust.")
+            except socket.gaierror:
+                print(f"[-] Hostname resolution failed for {self.host}. Check server address.")
+            except Exception as e:
+                print(f"[-] An unexpected error occurred during connection to {self.host}:{self.port}: {e}")
 
-        except BrokenPipeError:
-            print("Error: Connection lost to the server (Broken pipe) during receive.")
-        except ConnectionResetError:
-            print("Error: Connection reset by peer. Server might have closed the connection unexpectedly during receive.")
-        except ssl.SSLError as e:
-            print(f"Error during SSL communication while receiving file: {e}")
-        except ValueError:
-            print("Error: Invalid response format received from server. Check server protocol.")
-        except Exception as e:
-            print(f"An unexpected error occurred during file download (receive): {e}")
-        finally:
-            self.close_connection()
+            print(f"Retrying connection... ({attempt + 1}/3)")
+            time.sleep(2) # Wait a bit before retrying
+
+            if attempt_redetection and attempt == 0: # Only try to redetect on first failed retry
+                print("Attempting to redetect ngrok address...")
+                new_host, new_port = _get_ngrok_public_address()
+                if new_host and new_port and (new_host != self.host or new_port != self.port):
+                    print(f"Detected new ngrok address: {new_host}:{new_port}. Updating client configuration.")
+                    self.host = new_host
+                    self.port = new_port
+                else:
+                    print("No new ngrok address detected or it's the same. Sticking with current configuration.")
+
+        print("Failed to establish connection after multiple attempts.")
+        self._close_connection()
         return False
 
+    def _close_connection(self):
+        if self.secure_socket:
+            try:
+                self.secure_socket.shutdown(socket.SHUT_RDWR)
+                self.secure_socket.close()
+            except OSError as e:
+                if e.errno != 107:
+                    print(f"Warning: Error during SSL socket shutdown/close: {e}")
+            except Exception as e:
+                print(f"Error closing secure socket: {e}")
+            self.secure_socket = None
+        if self.s:
+            self.s.close()
+            self.s = None
+
+    def _send_command(self, command_str: str) -> str:
+        # Pass True to attempt_redetection for dynamic address update
+        if not self._connect(attempt_redetection=True):
+            return f"ERROR{self.separator}NO_CONNECTION"
+
+        try:
+            if self.session_id and command_str not in [self.REGISTER_COMMAND, self.LOGIN_COMMAND]:
+                command_str_with_session = f"{command_str.split(self.separator, 1)[0]}{self.separator}{self.session_id}"
+                if self.separator in command_str:
+                    command_str_with_session += self.separator + command_str.split(self.separator, 1)[1]
+                command_to_send = command_str_with_session
+            else:
+                command_to_send = command_str
+
+            self.secure_socket.sendall(command_to_send.encode('utf-8'))
+            response = self.secure_socket.recv(self.buffer_size).decode('utf-8')
+            return response
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError) as e:
+            print(f"Error sending command or receiving response: {e}. Connection may be lost.")
+            self._close_connection()
+            return f"ERROR{self.separator}CONNECTION_LOST"
+        except socket.timeout:
+            print("Socket timeout during command send/recv.")
+            self._close_connection()
+            return f"ERROR{self.separator}TIMEOUT"
+        except Exception as e:
+            print(f"An unexpected error occurred during command sending: {e}")
+            self._close_connection()
+            return f"ERROR{self.separator}GENERAL_ERROR"
+
+    def _receive_file_data(self, secure_socket: ssl.SSLSocket, filepath: str, filesize: int, display_filename: str) -> bool:
+        try:
+            progress = tqdm.tqdm(range(filesize), f"Receiving {os.path.basename(display_filename)}", unit="B", unit_scale=True, unit_divisor=1024, leave=True)
+            with open(filepath, "wb") as f:
+                bytes_received = 0
+                while bytes_received < filesize:
+                    bytes_to_read = min(filesize - bytes_received, self.buffer_size)
+                    bytes_read = secure_socket.recv(bytes_to_read)
+                    if not bytes_read:
+                        print(f"Warning: Connection broken during file reception for {display_filename} (received {bytes_received}/{filesize} bytes).")
+                        break
+                    f.write(bytes_read)
+                    bytes_received += len(bytes_read)
+                    progress.update(len(bytes_read))
+            progress.close()
+
+            if bytes_received == filesize:
+                print(f"Successfully received '{display_filename}' and saved to '{filepath}'.")
+                return True
+            else:
+                print(f"Warning: Received {bytes_received} bytes, expected {filesize} bytes for '{display_filename}'. File might be incomplete.")
+                return False
+
+        except FileNotFoundError:
+            print(f"Error: Could not open file for writing at '{filepath}'. Check permissions.")
+            return False
+        except OSError as e:
+            print(f"An OS error occurred while writing file to '{filepath}': {e}")
+            return False
+        except Exception as e:
+            print(f"An error occurred during file data reception: {e}")
+            return False
+
+    def _send_file_to_server(self, command: str, filepath: str) -> bool:
+        filename = os.path.basename(filepath)
+        filesize = os.path.getsize(filepath)
+
+        command_str = f"{command}{self.separator}{filename}{self.separator}{filesize}"
+
+        response = self._send_command(command_str)
+
+        if response == "READY_FOR_FILE_DATA":
+            print(f"Server is ready to receive {filename}. Sending data...")
+            try:
+                progress = tqdm.tqdm(range(filesize), f"Sending {filename}", unit="B", unit_scale=True, unit_divisor=1024)
+                with open(filepath, "rb") as f:
+                    while True:
+                        bytes_read = f.read(self.buffer_size)
+                        if not bytes_read:
+                            break
+                        self.secure_socket.sendall(bytes_read)
+                        progress.update(len(bytes_read))
+                progress.close()
+                print(f"File '{filename}' data sent. Waiting for server confirmation...")
+
+                final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8')
+                if final_response == self.UPLOAD_COMPLETE_RESPONSE:
+                    print(f"Server confirmed '{filename}' upload complete.")
+                    return True
+                else:
+                    print(f"Server reported upload issue for '{filename}': {final_response}")
+                    return False
+
+            except FileNotFoundError:
+                print(f"Error: File '{filepath}' not found locally.")
+                return False
+            except OSError as e:
+                print(f"An OS error occurred while reading file '{filepath}': {e}")
+                return False
+            except (BrokenPipeError, ConnectionResetError, ssl.SSLError) as e:
+                print(f"Error sending file data: {e}. Connection lost.")
+                self._close_connection()
+                return False
+            except Exception as e:
+                print(f"An unexpected error occurred during file upload: {e}")
+                self._close_connection()
+                return False
+        elif response.startswith("ERROR"):
+            print(f"Server denied upload or encountered an error: {response}")
+            return False
+        else:
+            print(f"Unexpected response from server: {response}")
+            return False
+
+    def _receive_file_from_server(self, command: str, filename: str) -> bool:
+        command_str = f"{command}{self.separator}{filename}"
+        response = self._send_command(command_str)
+
+        if response.startswith(self.DOWNLOAD_START_RESPONSE):
+            parts = response.split(self.separator, 2)
+            if len(parts) == 3:
+                server_filename = parts[1]
+                filesize = int(parts[2])
+                download_filepath = os.path.join(self.download_dir, os.path.basename(server_filename))
+
+                print(f"Server is sending '{server_filename}' ({filesize} bytes).")
+                self.secure_socket.sendall("READY_TO_RECEIVE_FILE_DATA".encode('utf-8')) # Acknowledge readiness
+
+                received_ok = self._receive_file_data(self.secure_socket, download_filepath, filesize, server_filename)
+
+                if received_ok:
+                    self.secure_socket.sendall("CLIENT_RECEPTION_COMPLETE".encode('utf-8'))
+                    return True
+                else:
+                    self.secure_socket.sendall("CLIENT_RECEPTION_INCOMPLETE".encode('utf-8'))
+                    return False
+            else:
+                print(f"Error: Malformed DOWNLOAD_START response from server: {response}")
+                return False
+        elif response.startswith(self.FILE_NOT_FOUND_RESPONSE):
+            parts = response.split(self.separator, 1)
+            print(f"Server reported: File '{parts[1] if len(parts) > 1 else filename}' not found.")
+            return False
+        elif response.startswith(self.AUTHENTICATION_REQUIRED_RESPONSE):
+            print("Authentication required. Please log in.")
+            return False
+        elif response.startswith(self.INVALID_SESSION_RESPONSE):
+            print("Your session is invalid or expired. Please log in again.")
+            self.session_id = None
+            self.username = None
+            self.user_role = None
+            return False
+        elif response.startswith("ERROR"):
+            print(f"Server error during download request: {response}")
+            return False
+        else:
+            print(f"Unexpected response from server for download: {response}")
+            return False
+
     def upload_private_file(self):
-        file_info = self.get_local_filename_from_user("Enter the filename to upload privately")
-        if file_info is None:
+        if not self.session_id:
+            print("Please log in to upload private files.")
             return
-        filename, filesize = file_info
-        self._send_file_to_server(self.UPLOAD_PRIVATE_COMMAND, filename, filesize)
-
-    def download_server_public_file(self):
-        remote_filename = input("Enter the filename to download from server's public folder (or 'q' to quit): ")
-        if remote_filename.lower() == 'q':
-            print("Exiting download selection.")
+        filepath = input("Enter the path to the file you want to upload privately: ")
+        if not os.path.exists(filepath):
+            print("File not found.")
             return
+        if self._send_file_to_server(self.UPLOAD_PRIVATE_COMMAND, filepath):
+            print("Private file upload initiated.")
 
-        self._receive_file_from_server(remote_filename, self.DOWNLOAD_SERVER_PUBLIC_COMMAND)
-
-    def upload_file_for_sharing(self):
-        file_info = self.get_local_filename_from_user("Enter the filename to upload for sharing")
-        if file_info is None:
+    def upload_for_sharing(self):
+        if not self.session_id:
+            print("Please log in to upload files for sharing.")
             return
-        filename, filesize = file_info
-        self._send_file_to_server(self.UPLOAD_FOR_SHARING_COMMAND, filename, filesize)
+        filepath = input("Enter the path to the file you want to upload for sharing: ")
+        if not os.path.exists(filepath):
+            print("File not found.")
+            return
+        if self._send_file_to_server(self.UPLOAD_FOR_SHARING_COMMAND, filepath):
+            print("File upload for sharing initiated.")
 
     def list_and_download_shared_files(self):
-        if not self.connect(): # Establish connection for LIST command
+        if not self.session_id:
+            print("Please log in to list and download shared files.")
             return
+        response = self._send_command(self.LIST_SHARED_COMMAND)
 
-        try:
-            self.s.sendall(self.LIST_SHARED_COMMAND.encode('utf-8'))
+        if response.startswith(self.SHARED_LIST_RESPONSE):
+            parts = response.split(self.separator, 1)
+            files_str = parts[1]
+            shared_files = files_str.split("|||")
+            print("\n--- Shared Files Available ---")
+            for i, file_name in enumerate(shared_files):
+                print(f"{i+1}. {file_name}")
+            print("------------------------------")
 
-            response = self.s.recv(self.buffer_size).decode('utf-8')
-            parts = response.split(self.separator, 1) # Split only on the first separator
+            while True:
+                choice = input("Enter the number of the file to download (or 'b' to go back): ")
+                if choice.lower() == 'b':
+                    break
+                try:
+                    index = int(choice) - 1
+                    if 0 <= index < len(shared_files):
+                        filename_to_download = shared_files[index]
+                        self._receive_file_from_server(self.DOWNLOAD_SHARED_COMMAND, filename_to_download)
+                        break
+                    else:
+                        print("Invalid number. Please try again.")
+                except ValueError:
+                    print("Invalid input. Please enter a number or 'b'.")
+        elif response == self.NO_FILES_SHARED_RESPONSE:
+            print("No shared files currently available.")
+        elif response.startswith(self.AUTHENTICATION_REQUIRED_RESPONSE):
+            print("Authentication required. Please log in.")
+        elif response.startswith(self.INVALID_SESSION_RESPONSE):
+            print("Your session is invalid or expired. Please log in again.")
+            self.session_id = None
+            self.username = None
+            self.user_role = None
+        elif response.startswith("ERROR"):
+            print(f"Error listing shared files: {response}")
+        else:
+            print(f"Unexpected response from server: {response}")
 
-            command = parts[0]
+    def download_server_public_file(self):
+        if not self.session_id:
+            print("Please log in to download server public files.")
+            return
+        filename = input("Enter the name of the public file on the server to download: ")
+        self._receive_file_from_server(self.DOWNLOAD_SERVER_PUBLIC_COMMAND, filename)
 
-            if command == self.SHARED_LIST_RESPONSE:
-                if len(parts) > 1:
-                    shared_files = parts[1].split("|||") # Your delimiter for list items
-                    print("\n--- Available Shared Files ---")
-                    for i, fname in enumerate(shared_files):
-                        print(f"{i+1}. {fname}")
-                    print("------------------------------")
-
-                    # Crucial: Close the connection after LIST, as _receive_file_from_server reconnects
-                    self.close_connection()
-
-                    while True:
-                        choice_str = input("Enter number to download, 'l' to list again, or 'q' to quit: ").strip().lower()
-                        if choice_str == 'q':
-                            print("Exiting shared file download.")
-                            break
-                        if choice_str == 'l':
-                            # Re-list, which will reconnect
-                            self.list_and_download_shared_files()
-                            return
-                        try:
-                            choice_idx = int(choice_str) - 1
-                            if 0 <= choice_idx < len(shared_files):
-                                file_to_download = shared_files[choice_idx]
-                                print(f"Attempting to download '{file_to_download}'...")
-                                # _receive_file_from_server will call connect() internally
-                                if self._receive_file_from_server(file_to_download, self.DOWNLOAD_SHARED_COMMAND):
-                                    break # Download successful, exit loop
-                                else:
-                                    # Download failed, maybe re-prompt or exit
-                                    print("Download failed, please try again or choose another file.")
-                            else:
-                                print("Invalid number. Please try again.")
-                        except ValueError:
-                            print("Invalid input. Please enter a number, 'l', or 'q'.")
-                else:
-                    print("Server responded with SHARED_LIST but no files. (Possible protocol error)")
-
-            elif command == self.NO_FILES_SHARED_RESPONSE:
-                print("No files currently available for sharing on the server.")
-            elif command == "SERVER_ERROR": # Assuming server might send this for general errors
-                print("Server encountered an error while listing shared files.")
-            else:
-                print(f"Server responded with an unknown command: {command}")
-
-        except BrokenPipeError:
-            print("Error: Connection lost to the server (Broken pipe) during list.")
-        except ConnectionResetError:
-            print("Error: Connection reset by peer. Server might have closed the connection unexpectedly during list.")
-        except ssl.SSLError as e:
-            print(f"Error during SSL communication while listing files: {e}")
-        except ValueError:
-            print("Error: Invalid response received from server for shared list. Check server logs or protocol.")
-        except Exception as e:
-            print(f"An unexpected error occurred during shared file listing: {e}")
-        finally:
-            self.close_connection() # Ensure connection is closed after listing or error
-
-    def start_interactive_session(self):
+    def run_client(self):
+        print("\n--- File Transfer Client ---")
         while True:
-            print("\n--- File Transfer Client ---")
-            print("1. Upload a file (Private to Server)")
-            print("2. Download a file (From Server's Public Folder)")
-            print("3. Upload a file (For Sharing with Other Clients)")
-            print("4. List & Download Shared Files")
-            print("q. Quit")
-            choice = input("Enter your choice: ").strip().lower()
+            status = f"Status: {'Logged in as ' + self.username + ' (' + self.user_role + ')' if self.session_id else 'Not Logged In'}"
+            print(f"\n{status}")
+            print("1. Register")
+            print("2. Login")
+
+            if self.session_id:
+                print("3. Upload Private File")
+                print("4. Upload File for Sharing")
+                print("5. List & Download Shared Files")
+                print("6. Download Server Public File")
+                if self.user_role == 'admin':
+                    print("7. Make File Public (Admin)")
+                print("L. Logout")
+            print("Q. Quit")
+
+            choice = input("Enter your choice: ").strip().upper()
 
             if choice == '1':
-                self.upload_private_file()
+                self.auth_handler.register_user()
             elif choice == '2':
-                self.download_server_public_file()
-            elif choice == '3':
-                self.upload_file_for_sharing()
-            elif choice == '4':
+                self.auth_handler.login_user()
+            elif choice == '3' and self.session_id:
+                self.upload_private_file()
+            elif choice == '4' and self.session_id:
+                self.upload_for_sharing()
+            elif choice == '5' and self.session_id:
                 self.list_and_download_shared_files()
-            elif choice == 'q':
-                print("Exiting client.")
+            elif choice == '6' and self.session_id:
+                self.download_server_public_file()
+            elif choice == '7' and self.session_id and self.user_role == 'admin':
+                self.auth_handler.make_file_public_admin()
+            elif choice == 'L' and self.session_id:
+                self.auth_handler.logout_user()
+            elif choice == 'Q':
+                print("Exiting client. Goodbye!")
+                self._close_connection()
                 break
             else:
-                print("Invalid choice. Please try again.")
-                
+                print("Invalid choice or you need to be logged in for that action. Please try again.")
+
 def _get_ngrok_public_address():
-        # Function to get the public address of the ngrok server
-        ngrok_api_url = "http://127.0.0.1:4040/api/tunnels"
-        try:
-            response = requests.get(ngrok_api_url) 
-            response.raise_for_status()
-            tunnels_data = response.json()
-            
-            for tunnel in tunnels_data['tunnels']:
-                if tunnel['proto'] == 'tcp':
-                    public_url = tunnel['public_url']
-                    parsed_url = urlparse(public_url)
-                    return parsed_url.hostname, parsed_url.port
-            
-            print("Error: No TCP tunnet found in ngrok API response.")
-            return None, None
-        
-        except requests.exceptions.ConnectionError:
-            print("Error: ngrok web interface not found. Is ngrok running?")
-            print("Please ensure ngrok is running in a separate terminal: ngrok tcp 8080")
-            return None, None
-        except requests.exceptions.RequestException as e:
-           print(f"Error querying ngrok API: {e}")
-           return None, None                    
+    NGROK_API_URL = "http://127.0.0.1:4040/api/tunnels"
+    try:
+        response = requests.get(NGROK_API_URL)
+        response.raise_for_status()
+        tunnels_data = response.json()
+
+        for tunnel in tunnels_data['tunnels']:
+            if tunnel['proto'] == 'tcp':
+                public_url = tunnel['public_url']
+                parsed_url = urlparse(public_url)
+                return parsed_url.hostname, parsed_url.port
+
+        print("Error: No TCP tunnel found in ngrok API response.")
+        return None, None
+
+    except requests.exceptions.ConnectionError:
+        print("Error: ngrok web interface not found. Is ngrok running and accessible on port 4040?")
+        print("Please ensure ngrok is running in a separate terminal: `ngrok tcp 8080` (or your server's port)")
+        return None, None
+    except requests.exceptions.RequestException as e:
+       print(f"Error querying ngrok API: {e}")
+       return None, None
 
 if __name__ == "__main__":
+    SERVER_HOST = None
+    SERVER_PORT = None
+
+    print("Attempting to detect ngrok public address...")
     detected_host, detected_port = _get_ngrok_public_address()
 
     if detected_host and detected_port:
@@ -387,9 +473,23 @@ if __name__ == "__main__":
         print(f"Detected ngrok tunnel: {SERVER_HOST}:{SERVER_PORT}")
     else:
         print("Could not automatically detect ngrok tunnel. Falling back to default settings.")
-        SERVER_HOST = "2.tcp.eu.ngrok.io"
-        SERVER_PORT = 18339                 
+        SERVER_HOST = "7.tcp.eu.ngrok.io"
+        SERVER_PORT = 13769
         print(f"Using fallback server: {SERVER_HOST}:{SERVER_PORT}")
+        if SERVER_HOST == "7.tcp.eu.ngrok.io":
+            print(f"WARNING: You are using placeholder fallback host address: [{SERVER_HOST}:{SERVER_PORT}]"
+                  "Please update them in client.py or ensure ngrok is running for auto-detection.")
 
-    client = FileTransferClient(SERVER_HOST, SERVER_PORT, server_cert='server.crt')
-    client.start_interactive_session()
+    CLIENT_CERT_PATH = None
+    CLIENT_KEY_PATH = None
+    SERVER_CERT_PATH = "server.crt"
+
+    if SERVER_HOST and SERVER_PORT and SERVER_HOST != "7.tcp.eu.ngrok.io":
+        client = FileTransferClient(SERVER_HOST, SERVER_PORT,
+                                    server_cert=SERVER_CERT_PATH,
+                                    client_cert=CLIENT_CERT_PATH,
+                                    client_key=CLIENT_KEY_PATH)
+        client.run_client()
+    else:
+        print("\nClient cannot start without a valid server address. "
+              "Please ensure ngrok is running or update fallback host/port.")

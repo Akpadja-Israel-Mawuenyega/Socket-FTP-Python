@@ -1,25 +1,23 @@
+# thread_functions.py
+
 import threading
 import socket
 import tqdm
 import os
 import sys
 import ssl
+from server_auth import ServerAuthHandler
 
 class ClientHandler(threading.Thread):
-    # A thread class to handle individual client connections for file transfer.
-    # Supports uploads to a private folder, uploads to a shared folder,
-    # listing shared files, and downloading shared files.
-
-    # Class initializer method
-    def __init__(self, client_socket: socket.socket, address: tuple, server_config: dict):
+    def __init__(self, client_socket: socket.socket, address: tuple, server_config: dict, auth_handler: ServerAuthHandler): # NEW: Pass auth_handler
         super().__init__()
-        self.client_socket = client_socket # This socket is ALREADY SSL-wrapped by server.py
+        self.client_socket = client_socket
         self.address = address
         self.buffer_size = server_config['buffer_size']
         self.separator = server_config['separator']
-        self.upload_dir = server_config['upload_dir']          # For private uploads
-        self.shared_files_dir = server_config['shared_files_dir'] # For server's public files
-        self.shared_uploads_dir = server_config['shared_uploads_dir']   # For client-shared files
+        self.upload_dir = server_config['upload_dir']
+        self.public_files_dir = server_config['public_files_dir'] # Server's public files (now renamed 'public_files')
+        self.shared_uploads_dir = server_config['shared_uploads_dir'] # For client-shared files
 
         # Command constants from server config
         self.UPLOAD_PRIVATE_COMMAND = server_config['UPLOAD_PRIVATE_COMMAND']
@@ -27,171 +25,291 @@ class ClientHandler(threading.Thread):
         self.UPLOAD_FOR_SHARING_COMMAND = server_config['UPLOAD_FOR_SHARING_COMMAND']
         self.LIST_SHARED_COMMAND = server_config['LIST_SHARED_COMMAND']
         self.DOWNLOAD_SHARED_COMMAND = server_config['DOWNLOAD_SHARED_COMMAND']
+        self.REGISTER_COMMAND = server_config['REGISTER_COMMAND']
+        self.LOGIN_COMMAND = server_config['LOGIN_COMMAND']
+        self.LOGOUT_COMMAND = server_config['LOGOUT_COMMAND']
+        self.MAKE_PUBLIC_ADMIN_COMMAND = server_config['MAKE_PUBLIC_ADMIN_COMMAND']
+        self.PING_COMMAND = "PING"
 
+        # Response constants from server config
         self.DOWNLOAD_START_RESPONSE = server_config['DOWNLOAD_START_RESPONSE']
         self.FILE_NOT_FOUND_RESPONSE = server_config['FILE_NOT_FOUND_RESPONSE']
         self.SHARED_LIST_RESPONSE = server_config['SHARED_LIST_RESPONSE']
         self.NO_FILES_SHARED_RESPONSE = server_config['NO_FILES_SHARED_RESPONSE']
+        self.UPLOAD_COMPLETE_RESPONSE = server_config['UPLOAD_COMPLETE_RESPONSE']
+        self.UPLOAD_INCOMPLETE_RESPONSE = server_config['UPLOAD_INCOMPLETE_RESPONSE']
 
-        self.daemon = True
+        # Authentication Responses
+        self.REGISTER_SUCCESS_RESPONSE = server_config['REGISTER_SUCCESS_RESPONSE']
+        self.REGISTER_FAILED_RESPONSE = server_config['REGISTER_FAILED_RESPONSE']
+        self.LOGIN_SUCCESS_RESPONSE = server_config['LOGIN_SUCCESS_RESPONSE']
+        self.LOGIN_FAILED_RESPONSE = server_config['LOGIN_FAILED_RESPONSE']
+        self.LOGOUT_SUCCESS_RESPONSE = server_config['LOGOUT_SUCCESS_RESPONSE']
+        self.AUTHENTICATION_REQUIRED_RESPONSE = server_config['AUTHENTICATION_REQUIRED_RESPONSE']
+        self.PERMISSION_DENIED_RESPONSE = server_config['PERMISSION_DENIED_RESPONSE']
+        self.ADMIN_FILE_MAKE_PUBLIC_SUCCESS = server_config['ADMIN_FILE_MAKE_PUBLIC_SUCCESS']
+        self.ADMIN_FILE_MAKE_PUBLIC_FAILED = server_config['ADMIN_FILE_MAKE_PUBLIC_FAILED']
+        self.INVALID_SESSION_RESPONSE = server_config['INVALID_SESSION_RESPONSE']
+
+
+        self.auth_handler = auth_handler # NEW: Store the auth handler
+
+        # Paths should be relative to the server.py script's location
+        # Re-verify and adjust directory paths to be robust
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.upload_dir = os.path.join(script_dir, self.upload_dir)
+        self.public_files_dir = os.path.join(script_dir, self.public_files_dir)
+        self.shared_uploads_dir = os.path.join(script_dir, self.shared_uploads_dir)
+
+        self._ensure_dirs_exist()
+
+    def _ensure_dirs_exist(self):
+        for directory in [self.upload_dir, self.public_files_dir, self.shared_uploads_dir]:
+            if not os.path.exists(directory):
+                os.makedirs(directory)
+                print(f"[Server] Created directory: {directory}")
 
     def run(self):
+        print(f"[{self.address}] Client connected.")
         try:
-            print(f"[{self.address}] Handler started. Waiting for command...")
-            # Receive the initial command from the client
-            initial_data = self.client_socket.recv(self.buffer_size).decode('utf-8')
-            if not initial_data:
-                print(f"[{self.address}] Client disconnected before sending command.")
-                return # Exit thread if client disconnects immediately
+            while True:
+                # Receive command from client
+                # Set a timeout for receiving commands to detect idle connections
+                self.client_socket.settimeout(300) # 5 minutes timeout
 
-            print(f"[{self.address}] Received command: {initial_data}")
-            parts = initial_data.split(self.separator, 2) # Split into command, filename, filesize
+                try:
+                    command_with_args = self.client_socket.recv(self.buffer_size).decode('utf-8')
+                except socket.timeout:
+                    print(f"[{self.address}] Client idle for 5 minutes. Closing connection.")
+                    break
+                except (BrokenPipeError, ConnectionResetError):
+                    print(f"[{self.address}] Client disconnected unexpectedly.")
+                    break
+                except ssl.SSLError as e:
+                    print(f"[{self.address}] SSL Error during receive: {e}. Closing connection.")
+                    break
+                except Exception as e:
+                    print(f"[{self.address}] Error receiving command: {e}. Closing connection.")
+                    break
 
-            command = parts[0]
+                if not command_with_args:
+                    print(f"[{self.address}] Client disconnected.")
+                    break
 
-            if command == self.UPLOAD_PRIVATE_COMMAND or \
-               command == self.UPLOAD_FOR_SHARING_COMMAND:
-                if len(parts) < 3:
-                    print(f"[{self.address}] Malformed UPLOAD command: {initial_data}")
-                    self.client_socket.sendall(b"ERROR: Malformed UPLOAD command")
-                    return
+                parts = command_with_args.split(self.separator)
+                command = parts[0]
+                session_id = None # Default
+                args_start_index = 1 # For non-auth commands, first arg is at index 1
 
-                filename_encoded = parts[1]
-                filesize_str = parts[2]
+                # Check if command is one that typically has a session ID
+                if command in [self.UPLOAD_PRIVATE_COMMAND, self.UPLOAD_FOR_SHARING_COMMAND,
+                               self.DOWNLOAD_SERVER_PUBLIC_COMMAND, self.LIST_SHARED_COMMAND,
+                               self.DOWNLOAD_SHARED_COMMAND, self.LOGOUT_COMMAND,
+                               self.MAKE_PUBLIC_ADMIN_COMMAND]:
+                    if len(parts) > 1:
+                        session_id = parts[1]
+                        args_start_index = 2 # Actual arguments start after session_id
+                    else:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        print(f"[{self.address}] Command '{command}' received without session ID. Authentication required.")
+                        continue # Skip to next loop iteration
 
-                filename = filename_encoded.encode('utf-8').decode('utf-8')
-                filesize = int(filesize_str)
+                current_user = None
+                if session_id:
+                    current_user = self.auth_handler.authenticate_session(session_id)
+                    if not current_user:
+                        self._send_response(self.client_socket, self.INVALID_SESSION_RESPONSE)
+                        print(f"[{self.address}] Invalid or expired session ID '{session_id[:8]}...' for command '{command}'.")
+                        continue # Skip to next loop iteration
 
-                # Determine target directory
-                target_dir = self.upload_dir if command == self.UPLOAD_PRIVATE_COMMAND else self.shared_uploads_dir
-                filepath = os.path.join(target_dir, os.path.basename(filename))
+                print(f"[{self.address}] Received command: {command} from user {current_user['username'] if current_user else 'UNAUTHENTICATED'}")
 
-                print(f"[{self.address}] Preparing to receive '{filename}' ({filesize} bytes) into '{target_dir}'...")
+                if command == self.REGISTER_COMMAND:
+                    if len(parts) == 3:
+                        username, password = parts[1], parts[2]
+                        self.auth_handler.handle_register(self.client_socket, username, password)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid REGISTER command format.")
 
-                # --- Server sends ACK: Ready for file data ---
-                self.client_socket.sendall(b"READY_FOR_FILE_DATA")
-                print(f"[{self.address}] Sent 'READY_FOR_FILE_DATA' acknowledgment.")
-                # -----------------------------------------------
+                elif command == self.LOGIN_COMMAND:
+                    if len(parts) == 3:
+                        username, password = parts[1], parts[2]
+                        self.auth_handler.handle_login(self.client_socket, username, password)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid LOGIN command format.")
 
-                received_ok = self._receive_file_data(self.client_socket, filepath, filesize, filename)
+                elif command == self.LOGOUT_COMMAND:
+                    if current_user: # Session was valid and user found
+                        self.auth_handler.handle_logout(self.client_socket, session_id)
+                    else: # Session was invalid, but client still sent it. Just inform.
+                        self._send_response(self.client_socket, self.LOGOUT_SUCCESS_RESPONSE) # Or just silently fail, client clears its state anyway.
 
-                if received_ok:
-                    self.client_socket.sendall(b"UPLOAD_COMPLETE")
-                    print(f"[{self.address}] Sent 'UPLOAD_COMPLETE' status.")
+                elif command == self.PING_COMMAND:
+                    print(f"[{self.address}] Received PING from {current_user['username'] if current_user else 'UNAUTHENTICATED'}. Sending PONG.")
+                    self._send_response(self.client_socket, "PONG")
+                
+                elif command == self.UPLOAD_PRIVATE_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: UPLOAD_PRIVATE<SEP>session_id<SEP>filename<SEP>filesize
+                    if len(parts) == 4:
+                        filename, filesize = parts[args_start_index], int(parts[args_start_index + 1])
+                        # Private uploads go to a folder specific to the user
+                        user_private_upload_dir = os.path.join(self.upload_dir, current_user['username'])
+                        os.makedirs(user_private_upload_dir, exist_ok=True) # Ensure user's private dir exists
+                        self._receive_file_from_client(self.client_socket, filename, filesize, user_private_upload_dir, is_private=True)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid UPLOAD_PRIVATE command format.")
+
+
+                elif command == self.DOWNLOAD_SERVER_PUBLIC_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: DOWNLOAD_SERVER_PUBLIC<SEP>session_id<SEP>filename
+                    if len(parts) == 3:
+                        filename = parts[args_start_index]
+                        self._serve_file_to_client(self.client_socket, filename, self.public_files_dir)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid DOWNLOAD_SERVER_PUBLIC command format.")
+
+
+                elif command == self.UPLOAD_FOR_SHARING_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: UPLOAD_FOR_SHARE<SEP>session_id<SEP>filename<SEP>filesize
+                    if len(parts) == 4:
+                        filename, filesize = parts[args_start_index], int(parts[args_start_index + 1])
+                        # Files for sharing go to shared_uploads_dir
+                        self._receive_file_from_client(self.client_socket, filename, filesize, self.shared_uploads_dir, is_private=False)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid UPLOAD_FOR_SHARE command format.")
+
+
+                elif command == self.LIST_SHARED_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: LIST_SHARED<SEP>session_id
+                    # No additional args needed
+                    self._handle_list_shared_files(self.client_socket)
+
+
+                elif command == self.DOWNLOAD_SHARED_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: DOWNLOAD_SHARED<SEP>session_id<SEP>filename
+                    if len(parts) == 3:
+                        filename = parts[args_start_index]
+                        self._serve_file_to_client(self.client_socket, filename, self.shared_uploads_dir)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid DOWNLOAD_SHARED command format.")
+
+
+                elif command == self.MAKE_PUBLIC_ADMIN_COMMAND:
+                    if not current_user:
+                        self._send_response(self.client_socket, self.AUTHENTICATION_REQUIRED_RESPONSE)
+                        continue
+                    # Format: MAKE_PUBLIC_ADMIN<SEP>session_id<SEP>filename
+                    if len(parts) == 3:
+                        filename = parts[args_start_index]
+                        self.auth_handler.handle_make_file_public_admin(self.client_socket, current_user, filename)
+                    else:
+                        self._send_response(self.client_socket, f"ERROR{self.separator}Invalid MAKE_PUBLIC_ADMIN command format.")
+
                 else:
-                    self.client_socket.sendall(b"UPLOAD_INCOMPLETE")
-                    print(f"[{self.address}] Sent 'UPLOAD_INCOMPLETE' status.")
+                    self._send_response(self.client_socket, f"UNKNOWN_COMMAND{self.separator}Unknown command: {command}")
+                    print(f"[{self.address}] Unknown command received: {command}")
 
-            elif command == self.LIST_SHARED_COMMAND: # Handle new list shared files
-                print(f"[{self.address}] Client requested list of shared files.")
-                self._handle_list_shared_files(self.client_socket)
-
-            elif command == self.DOWNLOAD_SERVER_PUBLIC_COMMAND or \
-                 command == self.DOWNLOAD_SHARED_COMMAND: # Handle new download shared file
-                if len(parts) < 2:
-                    print(f"[{self.address}] Malformed DOWNLOAD command: {initial_data}")
-                    self.client_socket.sendall(b"ERROR: Malformed DOWNLOAD command")
-                    return
-
-                requested_filename = parts[1]
-                source_dir = self.shared_files_dir if command == self.DOWNLOAD_SERVER_PUBLIC_COMMAND else self.shared_uploads_dir
-                filepath = os.path.join(source_dir, os.path.basename(requested_filename)) # Use basename for security
-
-                print(f"[{self.address}] Client requested to download '{requested_filename}' from '{source_dir}'.")
-
-                if not os.path.exists(filepath) or not os.path.isfile(filepath):
-                    print(f"[{self.address}] Requested '{requested_filename}' from '{source_dir}' but it was not found.")
-                    response = f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('utf-8')
-                    self.client_socket.sendall(response)
-                    return # Exit after sending error response
-
-                filesize = os.path.getsize(filepath)
-                encoded_filename = os.path.basename(requested_filename).encode('utf-8')
-                response_metadata = f"{self.DOWNLOAD_START_RESPONSE}{self.separator}{encoded_filename.decode('utf-8')}{self.separator}{filesize}".encode('utf-8')
-                self.client_socket.sendall(response_metadata)
-                print(f"[{self.address}] Sent download metadata for '{requested_filename}'.")
-
-                # --- Server waits for client's ACK before sending file data ---
-                client_ready_ack = self.client_socket.recv(self.buffer_size).decode('utf-8')
-                if client_ready_ack != "READY_TO_RECEIVE_FILE_DATA":
-                    print(f"[{self.address}] Client not ready for file data. Response: {client_ready_ack}")
-                    return # Abort if client doesn't send expected ACK
-                print(f"[{self.address}] Received client's 'READY_TO_RECEIVE_FILE_DATA' ACK.")
-
-                self._serve_file_to_client(self.client_socket, filepath, requested_filename, filesize)
-
-                # --- Server waits for final client status after sending file ---
-                final_client_status = self.client_socket.recv(self.buffer_size).decode('utf-8')
-                print(f"[{self.address}] Client reported file reception status: {final_client_status}")
-            else:
-                print(f"[{self.address}] Unknown command received: {command}")
-                self.client_socket.sendall("UNKNOWN_COMMAND".encode('utf-8'))
-
-        except (ConnectionResetError, BrokenPipeError):
-            print(f"[{self.address}] Connection lost unexpectedly.")
-        except socket.timeout: # Added timeout handling for recv calls
-            print(f"[{self.address}] Socket timeout during command reception.")
-        except ValueError:
-            print(f"[{self.address}] Error: Invalid data format received. Check client protocol or malformed message.")
         except Exception as e:
-            print(f"[{self.address}] An unexpected error occurred in run method: {e}")
+            print(f"[{self.address}] Error in client handler thread: {e}")
         finally:
-            print(f"[{self.address}] Handler closing connection.")
-            try:
-                # Proper shutdown for SSL sockets
-                self.client_socket.shutdown(socket.SHUT_RDWR)
-                self.client_socket.close()
-            except OSError as e:
-                if e.errno != 107: # 107 is 'Transport endpoint is not connected'
-                    print(f"[{self.address}] Warning: Error during SSL socket shutdown/close: {e}")
-            except Exception as e:
-                print(f"[{self.address}] Unexpected error during final socket close: {e}")
+            self._close_client_socket()
+            print(f"[{self.address}] Connection closed.")
 
 
-    def _receive_file_data(self, client_socket: socket.socket, filepath: str, filesize: int, display_filename: str) -> bool:
-        # Helper method to receive file data into a specified path.
+    def _send_response(self, client_socket: socket.socket, response: str):
+        """Helper to send encoded response."""
         try:
-            # Use 'leave=False' to clear the tqdm bar after completion, or 'leave=True' to keep it.
-            progress = tqdm.tqdm(range(filesize), f"Receiving {os.path.basename(display_filename)}", unit="B", unit_scale=True, unit_divisor=1024, leave=False)
+            client_socket.sendall(response.encode('utf-8'))
+        except (BrokenPipeError, ConnectionResetError) as e:
+            print(f"Error sending response: Client connection lost. {e}")
+        except Exception as e:
+            print(f"Error sending response: {e}")
+
+    # ... (rest of existing _receive_file_from_client, _serve_file_to_client, _handle_list_shared_files methods)
+    # These remain largely the same, they don't need authentication logic themselves,
+    # as authentication is handled before they are called.
+    def _receive_file_from_client(self, client_socket: socket.socket, filename: str, filesize: int, destination_dir: str, is_private: bool = False) -> bool:
+        filepath = os.path.join(destination_dir, os.path.basename(filename))
+        print(f"[{self.address}] Receiving file '{filename}' ({filesize} bytes) to '{filepath}'...")
+        self._send_response(client_socket, "READY_FOR_FILE_DATA")
+
+        try:
+            progress = tqdm.tqdm(range(filesize), f"Receiving {filename}", unit="B", unit_scale=True, unit_divisor=1024)
             with open(filepath, "wb") as f:
                 bytes_received = 0
                 while bytes_received < filesize:
-                    # Make sure to request only the remaining bytes if the last chunk is smaller than buffer_size
                     bytes_to_read = min(filesize - bytes_received, self.buffer_size)
                     bytes_read = client_socket.recv(bytes_to_read)
                     if not bytes_read:
-                        print(f"[{self.address}] Warning: Connection broken during file reception for {display_filename} (received {bytes_received}/{filesize} bytes).")
-                        break # Client disconnected prematurely
+                        print(f"[{self.address}] Warning: Client disconnected during file reception for {filename}. Received {bytes_received}/{filesize} bytes.")
+                        break
                     f.write(bytes_read)
                     bytes_received += len(bytes_read)
                     progress.update(len(bytes_read))
             progress.close()
 
             if bytes_received == filesize:
-                print(f"[{self.address}] Successfully received '{display_filename}' and saved to '{filepath}'.")
+                self._send_response(client_socket, self.UPLOAD_COMPLETE_RESPONSE)
+                print(f"[{self.address}] Successfully received '{filename}'.")
                 return True
             else:
-                print(f"[{self.address}] Warning: Received {bytes_received} bytes, expected {filesize} bytes for '{display_filename}'. File might be incomplete.")
+                self._send_response(client_socket, self.UPLOAD_INCOMPLETE_RESPONSE)
+                print(f"[{self.address}] Incomplete file reception for '{filename}'. Expected {filesize}, got {bytes_received}.")
+                # Optional: clean up incomplete file
+                if os.path.exists(filepath):
+                    os.remove(filepath)
                 return False
 
         except FileNotFoundError:
-            print(f"[Client {self.address}] Error: Could not open file for writing at '{filepath}'. Check permissions.")
+            self._send_response(client_socket, f"ERROR{self.separator}Server: File path error.")
+            print(f"[{self.address}] Error: Could not open file for writing at '{filepath}'. Check permissions.")
             return False
         except OSError as e:
-            print(f"[Client {self.address}] An OS error occurred while writing file to '{filepath}': {e}")
+            self._send_response(client_socket, f"ERROR{self.separator}Server: OS error during file write.")
+            print(f"[{self.address}] An OS error occurred while writing file to '{filepath}': {e}")
             return False
         except Exception as e:
-            print(f"[Client {self.address}] An error occurred during file data reception in _receive_file_data: {e}")
+            self._send_response(client_socket, f"ERROR{self.separator}Server: Unexpected error during file reception.")
+            print(f"[{self.address}] An error occurred during file data reception: {e}")
             return False
 
+    def _serve_file_to_client(self, client_socket: socket.socket, requested_filename: str, source_dir: str):
+        filepath = os.path.join(source_dir, os.path.basename(requested_filename)) # Ensure no directory traversal
+        print(f"[{self.address}] Client requested '{requested_filename}' from '{source_dir}'.")
 
-    def _serve_file_to_client(self, client_socket: socket.socket, filepath: str, requested_filename: str, filesize: int):
-        # Helper method to send a file to the client.
+        if not os.path.exists(filepath) or not os.path.isfile(filepath):
+            response = f"{self.FILE_NOT_FOUND_RESPONSE}{self.separator}{requested_filename}".encode('utf-8')
+            client_socket.sendall(response)
+            print(f"[{self.address}] File '{requested_filename}' not found in '{source_dir}'.")
+            return
+
+        filesize = os.path.getsize(filepath)
+        response = f"{self.DOWNLOAD_START_RESPONSE}{self.separator}{os.path.basename(filepath)}{self.separator}{filesize}".encode('utf-8')
+        client_socket.sendall(response)
+
+        # Wait for client's "READY_TO_RECEIVE_FILE_DATA" acknowledgement
+        ack = client_socket.recv(self.buffer_size).decode('utf-8')
+        if ack != "READY_TO_RECEIVE_FILE_DATA":
+            print(f"[{self.address}] Client did not send READY_TO_RECEIVE_FILE_DATA ack. Aborting download.")
+            return
 
         try:
-            print(f"[{self.address}] Serving '{requested_filename}' ({filesize} bytes) from '{filepath}'...")
-
-            progress = tqdm.tqdm(range(filesize), f"Serving {os.path.basename(requested_filename)}", unit="B", unit_scale=True, unit_divisor=1024, leave=False)
+            progress = tqdm.tqdm(range(filesize), f"Sending {requested_filename}", unit="B", unit_scale=True, unit_divisor=1024)
             with open(filepath, "rb") as f:
                 while True:
                     bytes_read = f.read(self.buffer_size)
@@ -200,7 +318,15 @@ class ClientHandler(threading.Thread):
                     client_socket.sendall(bytes_read)
                     progress.update(len(bytes_read))
             progress.close()
-            print(f"[{self.address}] Successfully served '{requested_filename}'.")
+            print(f"[{self.address}] Successfully served '{requested_filename}'. Waiting for client final ack...")
+
+            # Wait for client's final reception confirmation
+            client_final_ack = client_socket.recv(self.buffer_size).decode('utf-8')
+            if client_final_ack == "CLIENT_RECEPTION_COMPLETE":
+                print(f"[{self.address}] Client confirmed complete reception of '{requested_filename}'.")
+            else:
+                print(f"[{self.address}] Client reported incomplete reception of '{requested_filename}': {client_final_ack}")
+
 
         except FileNotFoundError:
             print(f"[{self.address}] Error: File '{requested_filename}' disappeared during serving.")
@@ -209,9 +335,7 @@ class ClientHandler(threading.Thread):
         except Exception as e:
             print(f"[{self.address}] An unexpected error occurred during file serving in _serve_file_to_client: {e}")
 
-
     def _handle_list_shared_files(self, client_socket: socket.socket):
-        # Helper method to list files in the shared_uploads directory.
         try:
             shared_files = [f for f in os.listdir(self.shared_uploads_dir) if os.path.isfile(os.path.join(self.shared_uploads_dir, f))]
 
@@ -229,4 +353,16 @@ class ClientHandler(threading.Thread):
 
         except Exception as e:
             print(f"[{self.address}] Error listing shared files: {e}")
-            client_socket.sendall("SERVER_ERROR".encode('utf-8')) # Generic error response
+            self._send_response(client_socket, f"ERROR{self.separator}Server error listing shared files.")
+
+
+    def _close_client_socket(self):
+        if self.client_socket:
+            try:
+                self.client_socket.shutdown(socket.SHUT_RDWR)
+                self.client_socket.close()
+            except OSError as e:
+                if e.errno != 107: # Transport endpoint is not connected
+                    print(f"Warning: Error during client socket shutdown/close for {self.address}: {e}")
+            except Exception as e:
+                print(f"Error closing client socket for {self.address}: {e}")
