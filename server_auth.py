@@ -1,117 +1,83 @@
 import bcrypt
 import uuid
-import os
-import socket
-import shutil
-from user_management import UserDatabaseManager
+import logging
+from user_management import DatabaseManager
+from datetime import datetime
 
-# This class will encapsulate authentication and authorization logic for the server side
 class ServerAuthHandler:
-    def __init__(self, db_manager: UserDatabaseManager, separator: str, public_files_dir: str):
+    def __init__(self, db_manager: DatabaseManager, config):
         self.db_manager = db_manager
-        self.separator = separator
-        self.public_files_dir = "public_files"
+        self.sessions = {}  # In-memory session store: {session_id: username}
+        self.config = config
+        self.REGISTER_COMMAND = self.config['COMMANDS']['REGISTER']
+        self.LOGIN_COMMAND = self.config['COMMANDS']['LOGIN']
+        self.LOGOUT_COMMAND = self.config['COMMANDS']['LOGOUT']
+        self.REGISTER_SUCCESS_RESPONSE = self.config['RESPONSES']['REGISTER_SUCCESS']
+        self.REGISTER_FAILED_RESPONSE = self.config['RESPONSES']['REGISTER_FAILED']
+        self.LOGIN_SUCCESS_RESPONSE = self.config['RESPONSES']['LOGIN_SUCCESS']
+        self.LOGIN_FAILED_RESPONSE = self.config['RESPONSES']['LOGIN_FAILED']
+        self.LOGOUT_SUCCESS_RESPONSE = self.config['RESPONSES']['LOGOUT_SUCCESS']
+        self.INVALID_SESSION_RESPONSE = self.config['RESPONSES']['INVALID_SESSION']
+        self.PERMISSION_DENIED_RESPONSE = self.config['RESPONSES']['PERMISSION_DENIED']
+        self.ERROR_RESPONSE = self.config['RESPONSES']['ERROR']
+        self.separator = self.config['SERVER']['SEPARATOR']
 
-        # Authentication and Authorization Responses
-        self.REGISTER_SUCCESS_RESPONSE = "REGISTER_SUCCESS"
-        self.REGISTER_FAILED_RESPONSE = "REGISTER_FAILED"
-        self.LOGIN_SUCCESS_RESPONSE = "LOGIN_SUCCESS"
-        self.LOGIN_FAILED_RESPONSE = "LOGIN_FAILED"
-        self.LOGOUT_SUCCESS_RESPONSE = "LOGOUT_SUCCESS"
-        self.AUTHENTICATION_REQUIRED_RESPONSE = "AUTH_REQUIRED"
-        self.PERMISSION_DENIED_RESPONSE = "PERMISSION_DENIED"
-        self.ADMIN_FILE_MAKE_PUBLIC_SUCCESS = "ADMIN_PUBLIC_SUCCESS"
-        self.ADMIN_FILE_MAKE_PUBLIC_FAILED = "ADMIN_PUBLIC_FAILED"
-        self.INVALID_SESSION_RESPONSE = "INVALID_SESSION"
-        self.FILE_NOT_FOUND_RESPONSE = "FILE_NOT_FOUND" # For admin public command
-        
-        print(f"Server's configured public files directory: {os.path.abspath(self.public_files_dir)}")
-
-
-    def authenticate_session(self, session_id: str) -> dict:
-        """
-        Validates the session ID and returns the user's details if valid.
-        Returns None if the session is invalid or expired.
-        """
-        if not session_id:
-            return None
-        user = self.db_manager.get_user_by_session_id(session_id)
-        return user
-
-    def _send_response(self, client_socket: socket.socket, response: str):
-        # Helper to send encoded response.
+    def register_user(self, username, password):
         try:
-            client_socket.sendall(response.encode('utf-8'))
-        except (BrokenPipeError, ConnectionResetError) as e:
-            print(f"Error sending response: Client connection lost. {e}")
-        except Exception as e:
-            print(f"Error sending response: {e}")
-
-    def handle_register(self, client_socket: socket.socket, username: str, password_plain: str):
-        print(f"Attempting to register user: {username}")
-        # Hash the password before storing
-        hashed_password = bcrypt.hashpw(password_plain.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        if self.db_manager.add_user(username, hashed_password):
-            self._send_response(client_socket, self.REGISTER_SUCCESS_RESPONSE)
-        else:
-            self._send_response(client_socket, f"{self.REGISTER_FAILED_RESPONSE}{self.separator}Username already exists or other DB error.")
-
-    def handle_login(self, client_socket: socket.socket, username: str, password_plain: str):
-        print(f"Attempting to log in user: {username}")
-        user = self.db_manager.verify_user(username, password_plain)
-        if user:
-            # Generate a new session ID
-            session_id = uuid.uuid4().hex
-            if self.db_manager.update_session(user['id'], session_id):
-                response_data = f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}{session_id}{self.separator}{user['role']}"
-                self._send_response(client_socket, response_data)
-                print(f"User '{username}' logged in successfully with session ID: {session_id[:8]}...")
-            else:
-                self._send_response(client_socket, f"{self.LOGIN_FAILED_RESPONSE}{self.separator}Could not create session.")
-        else:
-            self._send_response(client_socket, f"{self.LOGIN_FAILED_RESPONSE}{self.separator}Invalid username or password.")
-
-    def handle_logout(self, client_socket: socket.socket, session_id: str):
-        print(f"Attempting to log out session: {session_id[:8]}...")
-        if self.db_manager.clear_session(session_id):
-            self._send_response(client_socket, self.LOGOUT_SUCCESS_RESPONSE)
-            print(f"Session {session_id[:8]}... logged out.")
-        else:
-            self._send_response(client_socket, f"ERROR{self.separator}Failed to clear session.")
-
-    def handle_make_file_public_admin(self, client_socket: socket.socket, current_user: dict, full_source_path: str): # <--- Renamed 'filename' to 'full_source_path' for clarity
-        print(f"User {current_user['username']} ({current_user['role']}) attempting to make '{full_source_path}' public.")
-        if current_user['role'] != 'admin':
-            self._send_response(client_socket, self.PERMISSION_DENIED_RESPONSE)
-            print(f"Permission denied for {current_user['username']} to make '{full_source_path}' public.")
-            return
-        
-        filepath = full_source_path
-        file_basename = os.path.basename(filepath)
-        public_filepath = os.path.join(self.public_files_dir, file_basename)
-
-        print(f"Attempting to move FROM: {filepath}")
-        print(f"Attempting to move TO: {public_filepath}")
-
-        if not os.path.exists(filepath):
-            self._send_response(client_socket, f"{self.ADMIN_FILE_MAKE_PUBLIC_FAILED}{self.separator}Source file not found on server.")
-            print(f"Admin file make public failed: Source file '{filepath}' not found.")
-            return
-        if not os.path.isfile(filepath):
-            self._send_response(client_socket, f"{self.ADMIN_FILE_MAKE_PUBLIC_FAILED}{self.separator}Source is not a file.")
-            print(f"Admin file make public failed: Source '{filepath}' is not a file (it might be a directory).")
-            return
-
-        try:
-            os.makedirs(os.path.dirname(public_filepath), exist_ok=True)
+            if not username or not password:
+                logging.warning("Registration failed: Username or password was empty.")
+                return self.REGISTER_FAILED_RESPONSE
             
-            shutil.move(filepath, public_filepath)
-
-            self._send_response(client_socket, f"{self.ADMIN_FILE_MAKE_PUBLIC_SUCCESS}{self.separator}{file_basename}")
-            print(f"Admin '{file_basename}' successfully moved to public files from '{filepath}' by {current_user['username']}.")
-        except shutil.Error as e: 
-            self._send_response(client_socket, f"{self.ADMIN_FILE_MAKE_PUBLIC_FAILED}{self.separator}Server error during move: {e}")
-            print(f"Admin file make public failed for '{file_basename}': Shutil error - {e}")
+            if self.db_manager.get_user_by_username(username):
+                logging.warning(f"Registration failed: Username '{username}' already exists.")
+                return self.REGISTER_FAILED_RESPONSE
+            
+            success = self.db_manager.register_user(username, password)
+            if success:
+                logging.info(f"User '{username}' registered successfully.")
+                return self.REGISTER_SUCCESS_RESPONSE
+            else:
+                logging.warning(f"Registration failed for user '{username}' due to internal error.")
+                return self.REGISTER_FAILED_RESPONSE
         except Exception as e:
-            self._send_response(client_socket, f"{self.ADMIN_FILE_MAKE_PUBLIC_FAILED}{self.separator}Server error: {e}")
-            print(f"Admin file make public failed for '{file_basename}': Unexpected error - {e}")
+            logging.error(f"Error during user registration: {e}", exc_info=True)
+            return f"{self.ERROR_RESPONSE}{self.separator}{str(e)}"
+
+    def login_user(self, username, password):
+        try:
+            if not username or not password:
+                logging.warning(f"Login failed for user '{username}': Missing username or password.")
+                return self.LOGIN_FAILED_RESPONSE
+            
+            user = self.db_manager.get_user_by_username(username)
+            if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
+                session_id = str(uuid.uuid4())
+                self.db_manager.update_user_session(user['id'], session_id)
+                self.sessions[session_id] = username
+                logging.info(f"User '{username}' logged in successfully.")
+                return f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}{session_id}{self.separator}{username}{self.separator}{user['role']}"
+            
+            logging.warning(f"Login failed for user '{username}': Invalid credentials.")
+            return self.LOGIN_FAILED_RESPONSE
+        except Exception as e:
+            logging.error(f"Error during user login: {e}", exc_info=True)
+            return f"{self.ERROR_RESPONSE}{self.separator}{str(e)}"
+
+    def logout_user(self, session_id):
+        if session_id in self.sessions:
+            username = self.sessions.pop(session_id)
+            self.db_manager.update_user_session_by_username(username, None)
+            logging.info(f"User '{username}' logged out successfully.")
+            return self.LOGOUT_SUCCESS_RESPONSE
+        else:
+            return self.INVALID_SESSION_RESPONSE
+
+    def is_valid_session(self, session_id):
+        return session_id in self.sessions
+
+    def get_username_from_session(self, session_id):
+        return self.sessions.get(session_id)
+
+    def get_user_role(self, username):
+        user = self.db_manager.get_user_by_username(username)
+        return user['role'] if user else 'guest'
