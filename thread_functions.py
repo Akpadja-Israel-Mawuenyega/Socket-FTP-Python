@@ -166,7 +166,7 @@ class ClientHandler(threading.Thread):
                         bytes_received += len(bytes_read)
                         progress.update(len(bytes_read))
             
-            self._send_response(self.config['RESPONSES']['UPLOAD_COMPLETE'])
+            self._send_response(self.config['RESPONSES']['UPLOAD_DONE'])
             logging.info(f"[{self.address}] File '{file_name}' uploaded successfully to {target_dir}.")
         except Exception as e:
             logging.error(f"[{self.address}] Error during file upload: {e}", exc_info=True)
