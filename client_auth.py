@@ -46,6 +46,7 @@ class ClientAuthHandler:
                     username_res = parts[2]
                     role = parts[3]
                     logging.info(f"Login successful. Welcome, {username_res}")
+                    logging.debug(f"{session_id}")
                     return True, session_id, username_res, role
                 else:
                     logging.error(f"Login success response malformed: {response}")

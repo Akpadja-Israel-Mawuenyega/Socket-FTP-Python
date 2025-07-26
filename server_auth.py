@@ -53,7 +53,8 @@ class ServerAuthHandler:
             if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
                 session_id = str(uuid.uuid4())
                 self.db_manager.update_user_session(user['id'], session_id)
-                self.sessions[session_id] = username
+                self.sessions[session_id] = {'username': username, 'role': user['role']}
+
                 logging.info(f"User '{username}' logged in successfully.")
                 return f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}{session_id}{self.separator}{username}{self.separator}{user['role']}"
             
@@ -65,7 +66,8 @@ class ServerAuthHandler:
 
     def logout_user(self, session_id):
         if session_id in self.sessions:
-            username = self.sessions.pop(session_id)
+            session_data = self.sessions.pop(session_id)
+            username = session_data['username']
             self.db_manager.update_user_session_by_username(username, None)
             logging.info(f"User '{username}' logged out successfully.")
             return self.LOGOUT_SUCCESS_RESPONSE
@@ -76,8 +78,13 @@ class ServerAuthHandler:
         return session_id in self.sessions
 
     def get_username_from_session(self, session_id):
-        return self.sessions.get(session_id)
+        session_data = self.sessions.get(session_id)
+        return session_data['username'] if session_data else None
 
     def get_user_role(self, username):
         user = self.db_manager.get_user_by_username(username)
         return user['role'] if user else 'guest'
+    
+    def get_session_data(self, session_id):
+        return self.sessions.get(session_id)
+    
