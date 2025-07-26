@@ -87,7 +87,7 @@ You will typically need two or more separate terminal windows to run the server 
     The client will display an interactive menu, starting with login and registration.
 
 #### **Client Usage:**
-   Refer to the commands in `config.ini` to sue it, since this is planned to be used as an API for a web client, so extensive console-based interactive capabilities have not been implemented. Type the exact values of the command constants as declared in the configuration file. Any errors will be reported for your understanding. 
+   Refer to the commands in `config.ini` to use it, since this is planned to be used as an API for a web client, so extensive console-based interactive capabilities have not been implemented. Type the exact values of the command constants as declared in the configuration file. Any errors will be reported for your understanding. 
 
 -----
 
