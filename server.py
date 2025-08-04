@@ -12,11 +12,32 @@ from server_auth import ServerAuthHandler
 from user_management import DatabaseManager
 
 def setup_logging(config):
-    # setup logging module using configuration options
+    # setup logging levels and file
     log_level_str = config['LOGGING'].get('LEVEL', 'INFO').upper()
     log_format = config['LOGGING'].get('FORMAT', '%(asctime)s - %(levelname)s - %(message)s')
     log_level = getattr(logging, log_level_str, logging.INFO)
-    logging.basicConfig(level=log_level, format=log_format)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+
+    formatter = logging.Formatter(log_format)
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    root_logger.addHandler(console_handler)
+
+    log_file = config['LOGGING'].get('SERVER_LOG_FILE')
+    if log_file:
+        try:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(formatter)
+            root_logger.addHandler(file_handler)
+            logging.info(f"Logging configured to write to file: {log_file}")
+        except Exception as e:
+            logging.error(f"Failed to set up file logging: {e}")
 
 def read_config(path='config.ini'):
     # read configs
@@ -57,6 +78,7 @@ def main():
     try:
         db_manager = DatabaseManager(db_config)
         db_manager.create_user_table_if_not_exists()
+        db_manager.create_files_table_if_not_exists()
         auth_handler = ServerAuthHandler(db_manager, config)
     except Exception as e:
         logging.critical(f"Error initializing database or auth handler: {e}", exc_info=True)
@@ -85,7 +107,7 @@ def main():
                 try:
                     client_socket, address = secure_socket.accept()
                     logging.info(f"[+] Accepted connection from {address[0]}:{address[1]}")
-                    client_thread = ClientHandler(client_socket, address, config, auth_handler)
+                    client_thread = ClientHandler(client_socket, address, config, auth_handler, db_manager)
                     client_thread.start()
                 except ssl.SSLError as e:
                     logging.error(f"SSL error during client connection: {e}")

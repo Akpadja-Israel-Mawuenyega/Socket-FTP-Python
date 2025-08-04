@@ -104,12 +104,17 @@ class FileTransferClient:
                         break
                     elif command.lower() == self.config['COMMANDS']['UPLOAD_PRIVATE'].lower():
                         if len(args) == 1:
-                            self.handle_upload(args[0], private=True)
+                            self.handle_upload(args[0], private=True, public=False)
                         else:
                             logging.warning("Usage: UPLOAD_PRIVATE<SEP>filename")
+                    elif command.lower() == self.config['COMMANDS']['UPLOAD_PUBLIC'].lower():
+                        if len(args) == 1:
+                            self.handle_upload(args[0], private=False, public=True)
+                        else:
+                            logging.warning("Usage: UPLOAD_PUBLIC<SEP>filename")        
                     elif command.lower() == self.config['COMMANDS']['UPLOAD_FOR_SHARING'].lower():
                         if len(args) == 1:
-                            self.handle_upload(args[0], private=False)
+                            self.handle_upload(args[0], private=False, public=False)
                         else:
                             logging.warning("Usage: UPLOAD_FOR_SHARING<SEP>filename")
                     elif command.lower() == self.config['COMMANDS']['DOWNLOAD_PRIVATE'].lower():
@@ -126,6 +131,8 @@ class FileTransferClient:
                             logging.warning("Usage: DOWNLOAD_SERVER_PUBLIC<SEP>filename")
                     elif command.lower() == self.config['COMMANDS']['LIST_SHARED'].lower():
                         self.list_shared_files()
+                    elif command.lower() == self.config['COMMANDS']['LIST_PUBLIC'].lower():
+                        self.list_public_files()    
                     elif command.lower() == self.config['COMMANDS']['DOWNLOAD_SHARED'].lower():
                         if len(args) == 1:
                             # This is the key change to prompt the user for the correct format
@@ -156,6 +163,15 @@ class FileTransferClient:
                                 logging.warning("Usage: MAKE_SHARED_USER<SEP>filename")
                         else:
                             logging.warning("Permission denied.")
+                    elif command.lower() == self.config['COMMANDS']['ADMIN_DELETE_FILE'].lower():
+                        if self.user_role == 'admin':
+                            if len(command_parts) > 1:
+                                file_id = command_parts[1]
+                                self.admin_delete_public_file(file_id)
+                            else:
+                                logging.warning("Usage: ADMIN_DELETE_FILE<SEPARATOR>file_id")   
+                        else:
+                            logging.warning("Permission denied.")
                     else:
                         logging.warning("Unknown command.")        
         except KeyboardInterrupt:
@@ -164,17 +180,34 @@ class FileTransferClient:
             if self.secure_socket:
                 self.secure_socket.close()
             logging.info("Disconnected from server.")
+    
+    def is_safe_filename(self, filename):
+        if not filename or ".." in filename or "/" in filename or "\\" in filename:
+            logging.error("Invalid filename. Filenames cannot contain '..', '/', or '\\'.")
+            return False
+        return True        
 
-    def handle_upload(self, file_path, private):
+    def handle_upload(self, file_path, private, public):
         if not os.path.isfile(file_path):
             logging.error(f"File not found: {file_path}")
             return
         
         file_size = os.path.getsize(file_path)
         file_name = os.path.basename(file_path)
+        
+        if not self.is_safe_filename(file_name):
+            logging.error(f"Filename '{file_name}' contains invalid characters.")
+            return
 
-        command = f"{self.config['COMMANDS']['UPLOAD_PRIVATE'] if private else self.config['COMMANDS']['UPLOAD_FOR_SHARING']}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{file_size}"
-        self.secure_socket.sendall(command.encode())
+        if private:
+            command = self.config['COMMANDS']['UPLOAD_PRIVATE']
+        elif public:
+            command = self.config['COMMANDS']['UPLOAD_PUBLIC']
+        else:
+            command = self.config['COMMANDS']['UPLOAD_FOR_SHARING']
+              
+        full_command = f"{command}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{file_size}"
+        self.secure_socket.sendall(full_command.encode())
         
         response = self.secure_socket.recv(self.buffer_size).decode().strip()
         parts = response.split(self.separator)
@@ -182,7 +215,7 @@ class FileTransferClient:
 
         if status == self.config['RESPONSES']['READY_FOR_DATA']:
             logging.info("Server is ready for upload. Initiating transfer.")
-            self._transfer_file(file_path)
+            self.transfer_file(file_path)
         else:
             logging.error(f"Server refused upload: {response}")
 
@@ -198,7 +231,18 @@ class FileTransferClient:
             file_name_from_server = parts[1]
             file_size = int(parts[2])
             logging.info("Server is ready for download. Initiating transfer.")
-            self._receive_file(file_name_from_server, file_size)
+            
+            safe_file_name = os.path.basename(file_name_from_server)
+            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
+            resolved_path = os.path.abspath(local_file_path)
+            
+            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
+                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
+                self.secure_socket.close()
+                return
+            
+            self.receive_file(resolved_path, file_size)
+            
         elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
             logging.error(f"File '{file_name}' not found on server.")
         else:
@@ -216,7 +260,18 @@ class FileTransferClient:
             file_name_from_server = parts[1]
             file_size = int(parts[2])
             logging.info("Server is ready for download. Initiating transfer.")
-            self._receive_file(file_name_from_server, file_size)
+            
+            safe_file_name = os.path.basename(file_name_from_server)
+            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
+            resolved_path = os.path.abspath(local_file_path)
+            
+            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
+                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
+                self.secure_socket.close()
+                return
+            
+            self.receive_file(resolved_path, file_size)
+
         elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
             logging.error(f"File '{file_name}' not found on server.")
         else:
@@ -238,13 +293,24 @@ class FileTransferClient:
             file_name_from_server = parts[1]
             file_size = int(parts[2])
             logging.info("Server is ready for download. Initiating transfer.")
-            self._receive_file(file_name_from_server, file_size)
+            
+            safe_file_name = os.path.basename(file_name_from_server)
+            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
+            resolved_path = os.path.abspath(local_file_path)
+            
+            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
+                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
+                self.secure_socket.close()
+                return
+            
+            self.receive_file(resolved_path, file_size)
+            
         elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
             logging.error(f"File '{owner_and_file_name}' not found on server.")
         else:
             logging.error(f"Unexpected server response for download: {response}")
 
-    def _transfer_file(self, file_path):
+    def transfer_file(self, file_path):
         try:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
@@ -263,12 +329,10 @@ class FileTransferClient:
         except Exception as e:
             logging.error(f"Error during file upload data transfer: {e}", exc_info=True)
 
-    def _receive_file(self, file_name, file_size):
+    def receive_file(self, full_file_path, file_size):
         try:
-            file_path = os.path.join(self.downloads_dir,file_name)
-            
-            with open(file_path, "wb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Receiving {file_name}") as progress:
+            with open(full_file_path, "wb") as f:
+                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Receiving {os.path.basename(full_file_path)}") as progress:
                     bytes_received = 0
                     while bytes_received < file_size:
                         bytes_to_read = min(self.buffer_size, file_size - bytes_received)
@@ -278,13 +342,33 @@ class FileTransferClient:
                         f.write(bytes_read)
                         bytes_received += len(bytes_read)
                         progress.update(len(bytes_read))
-            
-            logging.info(f"File '{file_name}' received successfully.")
+                
+            logging.info(f"File '{os.path.basename(full_file_path)}' received successfully.")
             final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
             logging.info(f"Server response after download: {final_response}")
         except Exception as e:
             logging.error(f"Error during file download data transfer: {e}", exc_info=True)
             
+    def list_public_files(self):
+        command = f"{self.config['COMMANDS']['LIST_PUBLIC']}{self.separator}{self.session_id}"
+        self.secure_socket.sendall(command.encode())
+
+        response = self.secure_socket.recv(self.buffer_size).decode().strip()
+        parts = response.split(self.separator)
+        status = parts[0]
+
+        if status == self.config['RESPONSES']['LIST_SUCCESS']:
+            file_list = parts[1:]
+            logging.info("--- Public Files ---")
+            if not file_list:
+                logging.info("No public files found.")
+            for f in file_list:
+                logging.info(f" - {f}")
+        elif status == self.config['RESPONSES']['NO_FILES_PUBLIC']:
+            logging.info("No public files found.")
+        else:
+            logging.error(f"Unexpected response from server: {response}")     
+                
     def list_private_files(self):
         command = f"{self.config['COMMANDS']['LIST_PRIVATE']}{self.separator}{self.session_id}"
         self.secure_socket.sendall(command.encode())
@@ -356,7 +440,32 @@ class FileTransferClient:
         self.secure_socket.sendall(command.encode())
 
         response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        logging.info(f"Server response: {response}")    
+        logging.info(f"Server response: {response}") 
+    
+    def admin_delete_public_file(self, file_id):
+        if not self.session_id:
+            print("You must be logged in to delete files.")
+            return
+
+        command = self.config['COMMANDS']['ADMIN_DELETE_FILE']
+        request = f"{command}{self.separator}{self.session_id}{self.separator}{file_id}"
+        
+        try:
+            self.secure_socket.sendall(request.encode())
+            response = self.secure_socket.recv(self.buffer_size).decode()
+            
+            status, *message = response.split(self.separator)
+            
+            if status == self.config['RESPONSES']['ADMIN_DELETE_SUCCESS']:
+                print(f"Server response: {' '.join(message)}")
+            elif status == self.config['RESPONSES']['ADMIN_DELETE_FAILED']:
+                print(f"Server response: {' '.join(message)}")
+            else:
+                print(f"Unknown server response: {response}")
+        except FileNotFoundError as f:
+            print(f"File not found: {f}")
+        except Exception as e:
+            logging.error(f"Failed to send delete command: {e}")       
         
 def main():
     config = read_config()

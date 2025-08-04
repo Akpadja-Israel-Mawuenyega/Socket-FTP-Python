@@ -8,4 +8,4 @@
 server.key
 server.crt
 .env
-
+app.log

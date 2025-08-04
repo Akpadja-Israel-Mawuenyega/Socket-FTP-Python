@@ -22,14 +22,14 @@ class ClientAuthHandler:
     def set_socket(self, client_socket):
         self.client_socket = client_socket
 
-    def _get_credentials(self):
+    def get_credentials(self):
         username = input("Enter username: ")
         password = input("Enter password: ")
         return username, password
 
     def login(self):
         try:
-            username, password = self._get_credentials()
+            username, password = self.get_credentials()
             command = f"{self.config['COMMANDS']['LOGIN']}{self.separator}{username}{self.separator}{password}"
             self.client_socket.sendall(command.encode())
             
@@ -68,7 +68,7 @@ class ClientAuthHandler:
 
     def register(self):
         try:
-            username, password = self._get_credentials()
+            username, password = self.get_credentials()
             command = f"{self.config['COMMANDS']['REGISTER']}{self.separator}{username}{self.separator}{password}"
             self.client_socket.sendall(command.encode())
             

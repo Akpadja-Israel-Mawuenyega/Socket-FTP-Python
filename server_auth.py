@@ -53,7 +53,7 @@ class ServerAuthHandler:
             if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
                 session_id = str(uuid.uuid4())
                 self.db_manager.update_user_session(user['id'], session_id)
-                self.sessions[session_id] = {'username': username, 'role': user['role']}
+                self.sessions[session_id] = {'username': username, 'role': user['role'], 'user_id' : user['id']}
 
                 logging.info(f"User '{username}' logged in successfully.")
                 return f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}{session_id}{self.separator}{username}{self.separator}{user['role']}"
@@ -80,10 +80,6 @@ class ServerAuthHandler:
     def get_username_from_session(self, session_id):
         session_data = self.sessions.get(session_id)
         return session_data['username'] if session_data else None
-
-    def get_user_role(self, username):
-        user = self.db_manager.get_user_by_username(username)
-        return user['role'] if user else 'guest'
     
     def get_session_data(self, session_id):
         return self.sessions.get(session_id)
