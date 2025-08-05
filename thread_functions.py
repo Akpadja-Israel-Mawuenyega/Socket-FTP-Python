@@ -113,17 +113,18 @@ class ClientHandler(threading.Thread):
                         self.send_response(self.auth_handler.INVALID_SESSION_RESPONSE)
 
                 elif command == self.config['COMMANDS']['UPLOAD_FOR_SHARING']:
-                    if len(parts) >= 4 and self.auth_handler.is_valid_session(parts[1]):
-                        file_name = parts[2]
-                        file_size_str = parts[3]
-                        self.handle_upload_file(file_name, file_size_str, private=False, public=False)
+                    if len(parts) >= 5 and self.auth_handler.is_valid_session(parts[2]):
+                        file_name = parts[3]
+                        file_size_str = parts[4]
+                        recipient_username = parts[1]
+                        self.handle_upload_file(file_name, file_size_str, recipient_username, private=False, public=False)
                     else:
                         self.send_response(self.auth_handler.INVALID_SESSION_RESPONSE)
 
                 elif command == self.config['COMMANDS']['DOWNLOAD_PRIVATE']:
                     if len(parts) >= 3 and self.auth_handler.is_valid_session(parts[1]):
                         file_name = parts[2]
-                        self._handle_download_file(file_name, from_private=True, from_public=False)
+                        self.handle_download_file(file_name, from_private=True, from_public=False)
                     else:
                         self.send_response(self.auth_handler.INVALID_SESSION_RESPONSE)
 
@@ -142,7 +143,7 @@ class ClientHandler(threading.Thread):
                 elif command == self.config['COMMANDS']['DOWNLOAD_SERVER_PUBLIC']:
                     if len(parts) >= 2:
                         file_name = parts[1]
-                        self._handle_download_file(file_name, from_public=True, from_private=False)
+                        self.handle_download_file(file_name, from_public=True, from_private=False)
                     else:
                         self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid DOWNLOAD_SERVER_PUBLIC command format.")
 
@@ -186,10 +187,11 @@ class ClientHandler(threading.Thread):
                         self.send_response(self.auth_handler.INVALID_SESSION_RESPONSE)
                          
                 elif command == self.config['COMMANDS']['MAKE_SHARED_USER']:
-                    if len(parts) >= 3 and self.auth_handler.is_valid_session(parts[1]):
+                    if len(parts) >= 4 and self.auth_handler.is_valid_session(parts[1]):
                         file_name = parts[2]
+                        recipient_username = parts[3]
                         if self.user_role in ['user', 'admin']:
-                            self.make_shared_user(file_name)
+                            self.make_shared_user(file_name, recipient_username)
                         else:
                             self.send_response(self.auth_handler.PERMISSION_DENIED_RESPONSE)
                     else:
@@ -200,8 +202,8 @@ class ClientHandler(threading.Thread):
                             self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid command format. Usage: ADMIN_DELETE_FILE <session_id> <file_id>")
                             continue
                         
-                        file_id = parts[2]
-                        self.admin_delete_public_file(self.session_id, file_id)
+                        file_name = parts[2]
+                        self.admin_delete_public_file(self.session_id, file_name)
               
             except IndexError:
                 logging.error(f"[{self.address}] Malformed command received: {command_str}")
@@ -224,22 +226,37 @@ class ClientHandler(threading.Thread):
             self.client_socket.close()
         logging.info(f"[{self.address}] Disconnected.")
 
-    def handle_upload_file(self, file_name, file_size_str, private, public):
+    def handle_upload_file(self, file_name, file_size_str, recipient_username=None, private=False, public=False):
+        file_path = None        
         try:
             file_size = int(file_size_str)
             
             safe_file_name = os.path.basename(file_name)
-
+            
             is_public_db_flag = False
+            user_id_for_db = self.user_id 
+            recipient_id_for_db = None
+
             if private:
                 base_dir = os.path.join(self.upload_dir, self.username)
             elif public:
                 base_dir = self.public_files_dir
                 is_public_db_flag = True
-            else:
-                base_dir = os.path.join(self.shared_uploads_dir, self.username)
-                is_public_db_flag = True
-
+            else: 
+                if not recipient_username:
+                    logging.error(f"[{self.address}] No recipient specified for shared upload.")
+                    self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Recipient username is required for sharing.")
+                    return
+                
+                user_record = self.db_manager.get_user_by_username(recipient_username)
+                if user_record:
+                    recipient_id_for_db = user_record['id']
+                    base_dir = os.path.join(self.shared_uploads_dir, recipient_username)
+                else:
+                    logging.error(f"[{self.address}] User not found: '{recipient_username}'.")
+                    self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}User not found.")
+                    return
+            
             os.makedirs(base_dir, exist_ok=True)
             
             file_path = os.path.join(base_dir, safe_file_name)
@@ -251,13 +268,13 @@ class ClientHandler(threading.Thread):
                 return
             
             logging.info(f"[{self.address}] Saving uploaded file to: {resolved_path}")
-
-            if not self.db_manager.add_file_record(self.user_id, safe_file_name, file_size, is_public_db_flag):
-                logging.error(f"[{self.address}] Failed to add file record to database.")
+            
+            if not self.db_manager.add_file_record(user_id_for_db, safe_file_name, file_size, is_public_db_flag, recipient_id=recipient_id_for_db):
+                logging.error(f"[{self.address}] Failed to add file record to database for user {user_id_for_db}.")
                 self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Failed to upload file.")
                 return
 
-            self.send_response(f"{self.config['RESPONSES']['READY_FOR_DATA']}{self.separator}{file_name}{self.separator}{file_size_str}")
+            self.send_response(self.config['RESPONSES']['READY_FOR_DATA'])
 
             with open(resolved_path, "wb") as f:
                 with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Receiving {file_name}") as progress:
@@ -266,108 +283,112 @@ class ClientHandler(threading.Thread):
                         bytes_to_read = min(self.buffer_size, file_size - bytes_received)
                         bytes_read = self.client_socket.recv(bytes_to_read)
                         if not bytes_read:
-                            break
+                            logging.warning(f"[{self.address}] Client disconnected during file upload of {file_name}.")
+                            break 
                         f.write(bytes_read)
                         bytes_received += len(bytes_read)
                         progress.update(len(bytes_read))
             
-            logging.info(f"[{self.address}] File '{file_name}' uploaded successfully to {resolved_path}.")
-            self.send_response(self.config['RESPONSES']['UPLOAD_SUCCESS'])
+            if bytes_received == file_size:
+                logging.info(f"[{self.address}] File '{file_name}' uploaded successfully to {resolved_path}.")
+                self.send_response(self.config['RESPONSES']['UPLOAD_SUCCESS'])
+            else:
+                logging.error(f"[{self.address}] Incomplete upload of '{file_name}'. Expected {file_size} bytes, got {bytes_received}.")
+                if os.path.exists(resolved_path):
+                    os.remove(resolved_path) 
+                self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Incomplete file upload.")
+
+        except (ValueError, IndexError) as e:
+            logging.error(f"[{self.address}] Invalid file size or command format: {e}")
+            self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid command format.")
         except Exception as e:
-            logging.error(f"[{self.address}] Error during file upload: {e}", exc_info=True)
+            logging.error(f"[{self.address}] An unexpected error occurred during file upload: {e}", exc_info=True)
             self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Error during file upload.")
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+
 
     def handle_download_file(self, file_identifier, from_private=False, from_public=False):
         file_path = None
         base_dir = None
-        original_file_name = None
-        
-        if from_private:
-            safe_file_name = os.path.basename(file_identifier)
-            file_record = self.db_manager.get_file_record(file_name=safe_file_name, owner_id=self.user_id)
-            if not file_record or file_record['is_public']:
-                self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-                logging.warning(f"[{self.address}] Private file '{safe_file_name}' not found or not owned by user '{self.username}'.")
-                return
-            base_dir = os.path.join(self.upload_dir, self.username)
-            file_path = os.path.join(base_dir, safe_file_name)
-            original_file_name = safe_file_name
+        file_record = None
 
-        elif from_public:
-            safe_file_name = os.path.basename(file_identifier)
-            file_record = self.db_manager.get_file_record(file_name=safe_file_name, is_public=True)
-            if not file_record or file_record['owner_id'] != 0:
-                self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-                logging.warning(f"[{self.address}] Public file '{safe_file_name}' not found.")
-                return
-            base_dir = self.public_files_dir
-            file_path = os.path.join(base_dir, safe_file_name)
-            original_file_name = safe_file_name
-        
-        else:
-            try:
-                owner_username, original_file_name = file_identifier.split('/', 1)
-                safe_owner_username = os.path.basename(owner_username)
-                safe_file_name = os.path.basename(original_file_name)
-                
-                owner_id = self.db_manager.get_user_id_by_username(safe_owner_username)
-                if not owner_id:
-                    self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-                    logging.warning(f"[{self.address}] Shared file download failed: owner '{safe_owner_username}' not found.")
-                    return
-                
-                file_record = self.db_manager.get_file_record(file_name=safe_file_name, owner_id=owner_id)
+        try:
+            if from_private:
+                safe_file_name = os.path.basename(file_identifier)
+                file_record = self.db_manager.get_private_file_record(file_name=safe_file_name, owner_id=self.user_id)
                 if not file_record:
                     self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-                    logging.warning(f"[{self.address}] Shared file '{safe_file_name}' from '{safe_owner_username}' not found.")
+                    logging.warning(f"[{self.address}] Private file '{safe_file_name}' not found or not owned by user '{self.username}'.")
+                    return
+                base_dir = os.path.join(self.upload_dir, self.username)
+
+            elif from_public:
+                safe_file_name = os.path.basename(file_identifier)
+                file_record = self.db_manager.get_public_file_record(file_name=safe_file_name)
+                if not file_record:
+                    self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
+                    logging.warning(f"[{self.address}] Public file '{safe_file_name}' not found.")
+                    return
+                base_dir = self.public_files_dir
+
+            else:
+                safe_file_name = os.path.basename(file_identifier)
+                file_record = self.db_manager.get_file_record_in_shared_folder(file_name=safe_file_name, recipient_id=self.user_id)
+                if not file_record:
+                    self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
+                    logging.warning(f"[{self.address}] Shared file '{safe_file_name}' not found for user '{self.username}'.")
                     return
                 
-                base_dir = os.path.join(self.shared_uploads_dir, safe_owner_username)
-                file_path = os.path.join(base_dir, safe_file_name)
-                original_file_name = safe_file_name
-            except ValueError:
-                self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid shared file identifier format. Use owner/filename.")
+                base_dir = os.path.join(self.shared_uploads_dir, self.username)
+
+            file_path = os.path.join(base_dir, os.path.basename(file_record['file_name']))
+            resolved_path = os.path.abspath(file_path)
+
+            if not resolved_path.startswith(os.path.abspath(base_dir)):
+                self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid file path.")
+                logging.error(f"[{self.address}] Path traversal attempt detected during download: {file_identifier}")
                 return
 
-        resolved_path = os.path.abspath(file_path)
-        if not resolved_path.startswith(os.path.abspath(base_dir)):
-            self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid file path.")
-            logging.error(f"[{self.address}] Path traversal attempt detected during download: {file_identifier}")
-            return
-        
-        logging.info(f"[{self.address}] Attempting to download file from: {resolved_path}")
-        
-        if not os.path.isfile(resolved_path):
-            self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-            logging.warning(f"[{self.address}] File '{resolved_path}' not found for download.")
-            return
-        
-        try:
+            if not os.path.isfile(resolved_path):
+                self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
+                logging.warning(f"[{self.address}] File '{resolved_path}' not found on disk for download.")
+                return
+
+            logging.info(f"[{self.address}] Attempting to download file from: {resolved_path}")
+            
             file_size = os.path.getsize(file_path)
-            self.send_response(f"{self.config['RESPONSES']['DOWNLOAD_READY']}{self.separator}{original_file_name}{self.separator}{file_size}")
+            self.send_response(f"{self.config['RESPONSES']['DOWNLOAD_READY']}{self.separator}{file_record['file_name']}{self.separator}{file_size}")
 
             with open(resolved_path, "rb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Sending {original_file_name}") as progress:
+                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Sending {file_record['file_name']}") as progress:
                     while True:
                         bytes_read = f.read(self.buffer_size)
                         if not bytes_read:
                             break
                         self.client_socket.sendall(bytes_read)
                         progress.update(len(bytes_read))
-            
-            logging.info(f"[{self.address}] File '{original_file_name}' sent successfully.")
+                
+            logging.info(f"[{self.address}] File '{file_record['file_name']}' sent successfully.")
             self.send_response(self.config['RESPONSES']['DOWNLOAD_COMPLETE'])
+            
+        except (ValueError, KeyError) as e:
+            logging.error(f"[{self.address}] Invalid file identifier or database record format: {e}", exc_info=True)
+            self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Invalid command format or file record.")
         except Exception as e:
             logging.error(f"[{self.address}] Error during file download: {e}", exc_info=True)
             self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Error during file download.")
-    
+
     def handle_list_public_files(self): 
         try:
             public_files = self.db_manager.get_public_files()
             
             if public_files:
-                file_names = [f['file_name'] for f in public_files]
-                response = f"{self.config['RESPONSES']['LIST_SUCCESS']}{self.separator}{self.separator.join(file_names)}"
+                file_info_strings = [f"{f['file_id']},{f['file_name']}" for f in public_files]
+                
+                response_data = self.separator.join(file_info_strings)
+
+                response = f"{self.config['RESPONSES']['LIST_SUCCESS']}{self.separator}{response_data}"
                 self.send_response(response)
             else:
                 self.send_response(self.config['RESPONSES']['NO_FILES_PUBLIC'])
@@ -458,7 +479,7 @@ class ClientHandler(threading.Thread):
         try:
             safe_file_name = os.path.basename(file_name)
             
-            file_record = self.db_manager.get_file_record(file_name=safe_file_name, owner_id=self.user_id)
+            file_record = self.db_manager.get_private_file_record(file_name=safe_file_name, owner_id=self.user_id)
             if not file_record:
                 logging.warning(f"[{self.address}] User '{self.username}' tried to make a non-existent file public: '{safe_file_name}'.")
                 self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
@@ -479,33 +500,46 @@ class ClientHandler(threading.Thread):
             logging.error(f"[{self.address}] Error making file public by user: {e}", exc_info=True)
             self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}{str(e)}")
             
-    def make_shared_user(self, file_name):
+    def make_shared_user(self, file_name, recipient_username):
         try:
             safe_file_name = os.path.basename(file_name)
             
-            file_record = self.db_manager.get_file_record(file_name=safe_file_name, owner_id=self.user_id)
+            logging.info(f"DEBUG: owner_id being used: {self.user_id}")
+            logging.info(f"DEBUG: safe_file_name being used: '{safe_file_name}'")
+            
+            file_record = self.db_manager.get_private_file_record(file_name=safe_file_name, owner_id=self.user_id)
             if not file_record:
-                logging.warning(f"[{self.address}] User '{self.username}' tried to make a non-existent file shared: '{safe_file_name}'.")
                 self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
+                return
+
+            recipient_record = self.db_manager.get_user_by_username(recipient_username)
+            if not recipient_record:
+                self.send_response(self.config['RESPONSES']['USER_NOT_FOUND'])
                 return
             
             private_file_path = os.path.join(self.upload_dir, self.username, safe_file_name)
-            
-            if os.path.isfile(private_file_path):
-                user_shared_dir = os.path.join(self.shared_uploads_dir, self.username)
-                os.makedirs(user_shared_dir, exist_ok=True)
-                shared_file_path = os.path.join(user_shared_dir, safe_file_name)
-                
-                shutil.copy2(private_file_path, shared_file_path)
-                self.db_manager.update_file_visibility(file_record['file_id'], new_is_public=True)
-                self.send_response(self.config['RESPONSES']['USER_SHARED_SUCCESS'])
-                logging.info(f"[{self.address}] User '{self.username}' made private file '{safe_file_name}' shared.")
-            else:
-                logging.warning(f"[{self.address}] File '{safe_file_name}' exists in DB but not on disk for user '{self.username}'.")
+            if not os.path.isfile(private_file_path):
                 self.send_response(self.config['RESPONSES']['FILE_NOT_FOUND'])
-        except Exception as e:
-            logging.error(f"[{self.address}] Error making file shared by user: {e}", exc_info=True)
-            self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}{str(e)}")
+                return
+
+            recipient_shared_dir = os.path.join(self.shared_uploads_dir, recipient_username)
+            os.makedirs(recipient_shared_dir, exist_ok=True)
+            shared_file_path = os.path.join(recipient_shared_dir, safe_file_name)
+            
+            shutil.copy2(private_file_path, shared_file_path)
+
+            self.db_manager.add_file_record(
+                owner_id=self.user_id,
+                file_name=safe_file_name,
+                file_size=file_record['file_size'],
+                is_public=False,
+                recipient_id=recipient_record['id']
+            )
+
+            self.send_response(self.config['RESPONSES']['USER_SHARED_SUCCESS'])
+        
+        except Exception:
+            self.send_response(f"{self.auth_handler.ERROR_RESPONSE}{self.separator}Error sharing file.")
     
     def admin_delete_public_file(self, session_id, file_id):
         session_data = self.auth_handler.get_session_data(session_id)

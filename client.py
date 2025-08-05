@@ -113,10 +113,11 @@ class FileTransferClient:
                         else:
                             logging.warning("Usage: UPLOAD_PUBLIC<SEP>filename")        
                     elif command.lower() == self.config['COMMANDS']['UPLOAD_FOR_SHARING'].lower():
-                        if len(args) == 1:
-                            self.handle_upload(args[0], private=False, public=False)
+                        if len(args) == 2:
+                            recipient_username = args[1]
+                            self.handle_upload(args[0], private=False, public=False, recipient_username=recipient_username)
                         else:
-                            logging.warning("Usage: UPLOAD_FOR_SHARING<SEP>filename")
+                            logging.warning("Usage: UPLOAD_FOR_SHARING<SEP>filename<SEP>recipient_username")
                     elif command.lower() == self.config['COMMANDS']['DOWNLOAD_PRIVATE'].lower():
                         if len(args) == 1:
                             self.handle_download_private(args[0])
@@ -135,7 +136,6 @@ class FileTransferClient:
                         self.list_public_files()    
                     elif command.lower() == self.config['COMMANDS']['DOWNLOAD_SHARED'].lower():
                         if len(args) == 1:
-                            # This is the key change to prompt the user for the correct format
                             self.handle_download_shared(args[0])
                         else:
                             logging.warning("Usage: DOWNLOAD_SHARED<SEP>owner_username/filename")
@@ -157,8 +157,8 @@ class FileTransferClient:
                             logging.warning("Permission denied.")
                     elif command.lower() == self.config['COMMANDS']['MAKE_SHARED_USER'].lower():
                         if self.user_role in ['user', 'admin']:
-                            if len(args) == 1:
-                                self.make_shared_user(args[0])
+                            if len(args) == 2:
+                                self.make_shared_user(args[0], args[1])
                             else:
                                 logging.warning("Usage: MAKE_SHARED_USER<SEP>filename")
                         else:
@@ -166,10 +166,10 @@ class FileTransferClient:
                     elif command.lower() == self.config['COMMANDS']['ADMIN_DELETE_FILE'].lower():
                         if self.user_role == 'admin':
                             if len(command_parts) > 1:
-                                file_id = command_parts[1]
-                                self.admin_delete_public_file(file_id)
+                                file_name = command_parts[1]
+                                self.admin_delete_public_file(file_name)
                             else:
-                                logging.warning("Usage: ADMIN_DELETE_FILE<SEPARATOR>file_id")   
+                                logging.warning("Usage: ADMIN_DELETE_FILE<SEPARATOR>file_name")   
                         else:
                             logging.warning("Permission denied.")
                     else:
@@ -187,7 +187,7 @@ class FileTransferClient:
             return False
         return True        
 
-    def handle_upload(self, file_path, private, public):
+    def handle_upload(self, file_path, private, public, recipient_username=None):
         if not os.path.isfile(file_path):
             logging.error(f"File not found: {file_path}")
             return
@@ -205,6 +205,8 @@ class FileTransferClient:
             command = self.config['COMMANDS']['UPLOAD_PUBLIC']
         else:
             command = self.config['COMMANDS']['UPLOAD_FOR_SHARING']
+            if recipient_username:
+                command = f"{command}{self.separator}{recipient_username}"
               
         full_command = f"{command}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{file_size}"
         self.secure_socket.sendall(full_command.encode())
@@ -342,13 +344,23 @@ class FileTransferClient:
                         f.write(bytes_read)
                         bytes_received += len(bytes_read)
                         progress.update(len(bytes_read))
-                
-            logging.info(f"File '{os.path.basename(full_file_path)}' received successfully.")
-            final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
-            logging.info(f"Server response after download: {final_response}")
-        except Exception as e:
-            logging.error(f"Error during file download data transfer: {e}", exc_info=True)
             
+            if bytes_received == file_size:
+                final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
+                if final_response.startswith(self.config['RESPONSES']['DOWNLOAD_COMPLETE']):
+                    return True
+                else:
+                    os.remove(full_file_path)
+                    return False
+            else:
+                os.remove(full_file_path)
+                return False
+
+        except Exception as e:
+            if os.path.exists(full_file_path):
+                os.remove(full_file_path)
+            return False
+    
     def list_public_files(self):
         command = f"{self.config['COMMANDS']['LIST_PUBLIC']}{self.separator}{self.session_id}"
         self.secure_socket.sendall(command.encode())
@@ -358,17 +370,18 @@ class FileTransferClient:
         status = parts[0]
 
         if status == self.config['RESPONSES']['LIST_SUCCESS']:
-            file_list = parts[1:]
+            file_info_list = parts[1:]
             logging.info("--- Public Files ---")
-            if not file_list:
-                logging.info("No public files found.")
-            for f in file_list:
-                logging.info(f" - {f}")
+            
+            for file_info in file_info_list:
+                file_id, file_name = file_info.split(',')
+                logging.info(f" - ID: {file_id}, Name: {file_name}")
+                
         elif status == self.config['RESPONSES']['NO_FILES_PUBLIC']:
             logging.info("No public files found.")
         else:
-            logging.error(f"Unexpected response from server: {response}")     
-                
+            logging.error(f"Unexpected response from server: {response}")
+    
     def list_private_files(self):
         command = f"{self.config['COMMANDS']['LIST_PRIVATE']}{self.separator}{self.session_id}"
         self.secure_socket.sendall(command.encode())
@@ -431,24 +444,25 @@ class FileTransferClient:
         response = self.secure_socket.recv(self.buffer_size).decode().strip()
         logging.info(f"Server response: {response}")
         
-    def make_shared_user(self, file_name):
+    def make_shared_user(self, file_name, recipient_username):
         if not self.session_id:
             logging.warning("Please log in to make a file shared.")
-            return
+            return None
         
-        command = f"{self.config['COMMANDS']['MAKE_SHARED_USER']}{self.separator}{self.session_id}{self.separator}{file_name}"
+        command = f"{self.config['COMMANDS']['MAKE_SHARED_USER']}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{recipient_username}"
         self.secure_socket.sendall(command.encode())
 
         response = self.secure_socket.recv(self.buffer_size).decode().strip()
         logging.info(f"Server response: {response}") 
+        return response
     
-    def admin_delete_public_file(self, file_id):
+    def admin_delete_public_file(self, file_name):
         if not self.session_id:
             print("You must be logged in to delete files.")
             return
 
         command = self.config['COMMANDS']['ADMIN_DELETE_FILE']
-        request = f"{command}{self.separator}{self.session_id}{self.separator}{file_id}"
+        request = f"{command}{self.separator}{self.session_id}{self.separator}{file_name}"
         
         try:
             self.secure_socket.sendall(request.encode())

@@ -123,7 +123,9 @@ class DatabaseManager:
                         file_name VARCHAR(255) NOT NULL,
                         file_size BIGINT NOT NULL,
                         is_public BOOLEAN NOT NULL DEFAULT FALSE,
+                        recipient_id INTEGER DEFAULT NULL,
                         upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (recipient_id) REFERENCES users(id),
                         FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
                     )
                     """
@@ -132,13 +134,13 @@ class DatabaseManager:
                 except Exception as e:
                     logging.error(f"Error creating files table: {e}", exc_info=True)
     
-    def add_file_record(self, owner_id, file_name, file_size, is_public):
+    def add_file_record(self, owner_id, file_name, file_size, is_public, recipient_id=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
                     cursor.execute(
-                        "INSERT INTO files (owner_id, file_name, file_size, is_public) VALUES (%s, %s, %s, %s)",
-                        (owner_id, file_name, file_size, is_public)
+                        "INSERT INTO files (owner_id, file_name, file_size, is_public, recipient_id) VALUES (%s, %s, %s, %s, %s)",
+                        (owner_id, file_name, file_size, is_public, recipient_id)
                     )
                     logging.info(f"File record for '{file_name}' added to database.")
                     return True
@@ -164,21 +166,60 @@ class DatabaseManager:
                     logging.error(f"Failed to get file list: {e}")
                     return []
     
-    def get_file_record(self, file_id=None, file_name=None, owner_id=None):
+    def get_public_file_record(self, file_name):
+        with self.db_pool.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+                try:
+                    cursor.execute("""
+                        SELECT * FROM files
+                        WHERE file_name = %s AND is_public = TRUE AND recipient_id IS NULL;
+                    """, (file_name,))
+                    return cursor.fetchone()
+                except pymysql.Error as e:
+                    logging.error(f"Database error while fetching public file record: {e}")
+                    return None  
+    
+    def get_file_record_by_id(self, file_id):
+        with self.db_pool.get_connection() as conn:
+            with conn.cursor(pymysql.cursors.DictCursor) as cursor:
+                try:
+                    cursor.execute("""
+                        SELECT * FROM files
+                        WHERE file_id = %s;
+                    """, (file_id,))
+                    return cursor.fetchone()
+                except pymysql.Error as e:
+                    logging.error(f"Database error while fetching file record by ID: {e}")
+                    return None                      
+    
+    def get_private_file_record(self, file_name, owner_id):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    if file_id:
-                        cursor.execute("SELECT * FROM files WHERE file_id = %s", (file_id,))
-                    elif file_name and owner_id:
-                        cursor.execute("SELECT * FROM files WHERE file_name = %s AND owner_id = %s", (file_name, owner_id))
-                    else:
-                        return None
-                    return cursor.fetchone()
-                except Exception as e:
-                    logging.error(f"Failed to get file record: {e}")
+                    cursor.execute("""
+                        SELECT * FROM files 
+                        WHERE file_name = %s AND owner_id = %s AND is_public = FALSE AND recipient_id IS NULL;
+                    """, (file_name, owner_id))
+                    file_record = cursor.fetchone()
+                    logging.info(f"DEBUG: get_private_file_record query result: {file_record}")
+                    return file_record
+                except pymysql.Error as e:
+                    logging.error(f"Database error: {e}")
                     return None
     
+    def get_file_record_in_shared_folder(self, file_name, recipient_id):
+        with self.db_pool.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:      
+                    cursor.execute("""
+                        SELECT * FROM files
+                        WHERE file_name = %s AND recipient_id = %s AND is_public = FALSE;
+                    """, (file_name, recipient_id))
+                    return cursor.fetchone()
+                except pymysql.Error as e:
+                    logging.error(f"Database error while fetching shared file record: {e}")
+                    return None
+                  
     def get_files_by_owner(self, owner_id):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -193,7 +234,7 @@ class DatabaseManager:
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    cursor.execute("SELECT file_name FROM files WHERE is_public = TRUE")
+                    cursor.execute("SELECT file_id, file_name FROM files WHERE is_public = TRUE")
                     return cursor.fetchall()
                 except Exception as e:
                     logging.error(f"Failed to get public files: {e}")
@@ -216,7 +257,7 @@ class DatabaseManager:
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    file_record = self.get_file_record(file_id=file_id)
+                    file_record = self.get_file_record_by_id(file_id=file_id)
                     if not file_record:
                         logging.warning(f"File ID {file_id} not found.")
                         return None, None, None
@@ -249,3 +290,4 @@ class DatabaseManager:
                 except Exception as e:
                     logging.error(f"Failed to delete file record: {e}", exc_info=True)
                     return None, None, None
+            
