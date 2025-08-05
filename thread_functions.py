@@ -49,11 +49,18 @@ class ClientHandler(threading.Thread):
                 command_str = command_raw.decode('utf-8').strip()
                 if not command_str:
                     continue
-                
-                logging.info(f"[{self.address}] Received raw command: '{command_str}'")
-                
+                                
                 parts = command_str.split(self.separator)
                 command = parts[0]
+                
+                if command in [self.config['COMMANDS']['LOGIN'], self.config['COMMANDS']['REGISTER']]:
+                    if len(parts) >= 2:
+                        username = parts[1]
+                        logging.info(f"[{self.address}] Received command '{command}' from user '{username}'. Password masked.")
+                    else:
+                        logging.warning(f"[{self.address}] Received malformed command: '{command_str}'")
+                else:
+                    logging.info(f"[{self.address}] Received raw command: '{command_str}'")
                 
                 # --- Authentication Commands ---
                 if command == self.auth_handler.REGISTER_COMMAND:
