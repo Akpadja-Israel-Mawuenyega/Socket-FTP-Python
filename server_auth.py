@@ -7,8 +7,10 @@ from datetime import datetime
 class ServerAuthHandler:
     def __init__(self, db_manager: DatabaseManager, config):
         self.db_manager = db_manager
-        self.sessions = {}  # In-memory session store: {session_id: username}
+        self.sessions = {}
         self.config = config
+        
+        # Pull constants from config for consistency
         self.REGISTER_COMMAND = self.config['COMMANDS']['REGISTER']
         self.LOGIN_COMMAND = self.config['COMMANDS']['LOGIN']
         self.LOGOUT_COMMAND = self.config['COMMANDS']['LOGOUT']
@@ -23,64 +25,71 @@ class ServerAuthHandler:
         self.separator = self.config['SERVER']['SEPARATOR']
 
     def register_user(self, username, password):
+        """Registers a new user via the db_manager."""
         try:
             if not username or not password:
-                logging.warning("Registration failed: Username or password was empty.")
                 return self.REGISTER_FAILED_RESPONSE
             
-            if self.db_manager.get_user_by_username(username):
-                logging.warning(f"Registration failed: Username '{username}' already exists.")
+            # Use the existing check from db_manager or local check
+            if self.db_manager.get_user_record(username=username):
+                logging.warning(f"Registration failed: User '{username}' already exists.")
                 return self.REGISTER_FAILED_RESPONSE
             
-            success = self.db_manager.register_user(username, password)
-            if success:
+            if self.db_manager.register_user(username, password):
                 logging.info(f"User '{username}' registered successfully.")
                 return self.REGISTER_SUCCESS_RESPONSE
-            else:
-                logging.warning(f"Registration failed for user '{username}' due to internal error.")
-                return self.REGISTER_FAILED_RESPONSE
+            return self.REGISTER_FAILED_RESPONSE
         except Exception as e:
-            logging.error(f"Error during user registration: {e}", exc_info=True)
+            logging.error(f"Registration Error: {e}")
             return f"{self.ERROR_RESPONSE}{self.separator}{str(e)}"
 
     def login_user(self, username, password):
+        """Authenticates user and returns the full 5-part success string."""
         try:
-            if not username or not password:
-                logging.warning(f"Login failed for user '{username}': Missing username or password.")
-                return self.LOGIN_FAILED_RESPONSE
+            user = self.db_manager.get_user_record(username=username)
             
-            user = self.db_manager.get_user_by_username(username)
+            # Verify password against hash
             if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
                 session_id = str(uuid.uuid4())
-                self.db_manager.update_user_session(user['id'], session_id)
-                self.sessions[session_id] = {'username': username, 'role': user['role'], 'user_id' : user['id']}
+                
+                # Store session in-memory for fast access
+                self.sessions[session_id] = {
+                    'username': username, 
+                    'role': user['role'], 
+                    'user_id': user['id']
+                }
+                
+                # Sync session with DB (optional, for persistent sessions)
+                self.db_manager.update_user_record(user['id'], session_id=session_id)
 
-                logging.info(f"User '{username}' logged in successfully.")
-                return f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}{session_id}{self.separator}{username}{self.separator}{user['role']}"
+                logging.info(f"User '{username}' (ID: {user['id']}) logged in.")
+                
+                # IMPORTANT: Return all 5 parts required by ClientHandler
+                # Format: SUCCESS|SESSION_ID|USERNAME|ROLE|USER_ID
+                return (f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}"
+                        f"{session_id}{self.separator}"
+                        f"{username}{self.separator}"
+                        f"{user['role']}{self.separator}"
+                        f"{user['id']}")
             
-            logging.warning(f"Login failed for user '{username}': Invalid credentials.")
             return self.LOGIN_FAILED_RESPONSE
         except Exception as e:
-            logging.error(f"Error during user login: {e}", exc_info=True)
+            logging.error(f"Login Error: {e}")
             return f"{self.ERROR_RESPONSE}{self.separator}{str(e)}"
 
     def logout_user(self, session_id):
-        if session_id in self.sessions:
-            session_data = self.sessions.pop(session_id)
-            username = session_data['username']
-            self.db_manager.update_user_session_by_username(username, None)
-            logging.info(f"User '{username}' logged out successfully.")
+        """Removes session and clears it from DB."""
+        session_data = self.sessions.pop(session_id, None)
+        if session_data:
+            self.db_manager.update_user_record(session_data['user_id'], session_id=None)
+            logging.info(f"User '{session_data['username']}' logged out.")
             return self.LOGOUT_SUCCESS_RESPONSE
-        else:
-            return self.INVALID_SESSION_RESPONSE
+        return self.INVALID_SESSION_RESPONSE
 
     def is_valid_session(self, session_id):
+        """Check if session exists in memory."""
         return session_id in self.sessions
 
-    def get_username_from_session(self, session_id):
-        session_data = self.sessions.get(session_id)
-        return session_data['username'] if session_data else None
-    
     def get_session_data(self, session_id):
+        """Returns the full session dict: username, role, user_id."""
         return self.sessions.get(session_id)
-    

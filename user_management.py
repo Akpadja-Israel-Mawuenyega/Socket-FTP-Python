@@ -63,92 +63,41 @@ class DatabaseManager:
                     logging.error(f"Error registering user '{username}': {e}", exc_info=True)
                     return False             
     
-    def get_user_by_username(self, username):
+    def get_user_record(self, user_id=None, username=None, fields="id, username, password_hash, role, session_id"):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    cursor.execute("SELECT id, username, password_hash, role, session_id FROM users WHERE username = %s", (username,))
-                    result = cursor.fetchone()
-                    return result
+                    if user_id:
+                        query = f"SELECT {fields} FROM users WHERE id = %s"
+                        params = (user_id,)
+                    elif username:
+                        query = f"SELECT {fields} FROM users WHERE username = %s"
+                        params = (username,)
+                    else:
+                        return None
+                
+                    cursor.execute(query, params)
+                    return cursor.fetchone()
                 except pymysql.Error as e:
-                    logging.error(f"Error getting user by username '{username}': {e}", exc_info=True)
-                    return None
-   
-    def get_user_by_id(self, user_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute("SELECT id, username, password_hash, role, session_id FROM users WHERE id = %s", (user_id,))
-                    result = cursor.fetchone()
-                    return result
-                except pymysql.Error as e:
-                    logging.error(f"Error getting user by ID '{user_id}': {e}", exc_info=True)
-                    return None             
+                    logging.error(f"Error fetching user record: {e}")
+                    return None      
     
-    def get_user_id_by_username(self, username):
+    def add_file_record(self, owner_id, file_name, file_size, is_public=False, recipient_id=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
-                    result = cursor.fetchone()
-                    return result['id'] if result else None
-                except pymysql.Error as e:
-                    logging.error(f"Error getting user ID for '{username}': {e}", exc_info=True)
-                    return None
-    
-    def update_user_session(self, user_id, session_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute("UPDATE users SET session_id = %s WHERE id = %s", (session_id, user_id))
-                except pymysql.Error as e:
-                    logging.error(f"Error updating session for user ID '{user_id}': {e}", exc_info=True)
-
-    def update_user_session_by_username(self, username, session_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute("UPDATE users SET session_id = %s WHERE username = %s", (session_id, username))
-                except pymysql.Error as e:
-                    logging.error(f"Error updating session for user '{username}': {e}", exc_info=True)
-    
-    def create_files_table_if_not_exists(self):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    create_table_sql = """
-                    CREATE TABLE IF NOT EXISTS files (
-                        file_id INT AUTO_INCREMENT PRIMARY KEY,
-                        owner_id INT NOT NULL,
-                        file_name VARCHAR(255) NOT NULL,
-                        file_size BIGINT NOT NULL,
-                        is_public BOOLEAN NOT NULL DEFAULT FALSE,
-                        recipient_id INTEGER DEFAULT NULL,
-                        upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (recipient_id) REFERENCES users(id),
-                        FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
-                    )
+                    sql = """
+                        INSERT INTO files (owner_id, file_name, file_size, is_public, recipient_id)
+                        VALUES (%s, %s, %s, %s, %s)
                     """
-                    cursor.execute(create_table_sql)
-                    logging.info("Files table checked/created successfully.")
-                except Exception as e:
-                    logging.error(f"Error creating files table: {e}", exc_info=True)
-    
-    def add_file_record(self, owner_id, file_name, file_size, is_public, recipient_id=None):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute(
-                        "INSERT INTO files (owner_id, file_name, file_size, is_public, recipient_id) VALUES (%s, %s, %s, %s, %s)",
-                        (owner_id, file_name, file_size, is_public, recipient_id)
-                    )
-                    logging.info(f"File record for '{file_name}' added to database.")
+                    cursor.execute(sql, (owner_id, file_name, file_size , is_public, recipient_id))
+                    logging.info(f"File record for '{file_name}' added (Public: {is_public}.")
                     return True
                 except Exception as e:
-                    logging.error(f"Failed to add file record: {e}")
+                    logging.error(f"Failed to add file record for {file_name}: {e}.")
                     return False
-    
-    def get_files(self, owner_id=None, is_public=None):
+                
+    def get_files(self, owner_id=None, is_public=None, recipient_id=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
@@ -157,6 +106,9 @@ class DatabaseManager:
                     if owner_id is not None:
                         query += " AND owner_id = %s"
                         params.append(owner_id)
+                    if recipient_id:
+                        query += " AND recipient_id = %s"
+                        params.append(recipient_id)    
                     if is_public is not None:
                         query += " AND is_public = %s"
                         params.append(is_public)
@@ -166,128 +118,117 @@ class DatabaseManager:
                     logging.error(f"Failed to get file list: {e}")
                     return []
     
-    def get_public_file_record(self, file_name):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-                try:
-                    cursor.execute("""
-                        SELECT * FROM files
-                        WHERE file_name = %s AND is_public = TRUE AND recipient_id IS NULL;
-                    """, (file_name,))
-                    return cursor.fetchone()
-                except pymysql.Error as e:
-                    logging.error(f"Database error while fetching public file record: {e}")
-                    return None  
-    
-    def get_file_record_by_id(self, file_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor(pymysql.cursors.DictCursor) as cursor:
-                try:
-                    cursor.execute("""
-                        SELECT * FROM files
-                        WHERE file_id = %s;
-                    """, (file_id,))
-                    return cursor.fetchone()
-                except pymysql.Error as e:
-                    logging.error(f"Database error while fetching file record by ID: {e}")
-                    return None                      
-    
-    def get_private_file_record(self, file_name, owner_id):
+    def get_file_record(self, file_id=None, file_name=None, owner_id=None, recipient_id=None, is_public=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    cursor.execute("""
-                        SELECT * FROM files 
-                        WHERE file_name = %s AND owner_id = %s AND is_public = FALSE AND recipient_id IS NULL;
-                    """, (file_name, owner_id))
-                    file_record = cursor.fetchone()
-                    logging.info(f"DEBUG: get_private_file_record query result: {file_record}")
-                    return file_record
-                except pymysql.Error as e:
-                    logging.error(f"Database error: {e}")
-                    return None
-    
-    def get_file_record_in_shared_folder(self, file_name, recipient_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:      
-                    cursor.execute("""
-                        SELECT * FROM files
-                        WHERE file_name = %s AND recipient_id = %s AND is_public = FALSE;
-                    """, (file_name, recipient_id))
+                    query = "SELECT * FROM files WHERE 1=1"
+                    params = []
+                    if file_id:
+                        query += " AND file_id = %s"
+                        params.append(file_id)
+                    if file_name:
+                        query += " AND file_name = %s"
+                        params.append(file_name)
+                    if owner_id:
+                        query += " AND owner_id = %s"
+                        params.append(owner_id)
+                    if recipient_id:
+                        query += " AND recipient_id = %s"
+                        params.append(recipient_id)
+                    if is_public is not None:
+                        query += " AND is_public = %s"
+                        params.append(is_public)
+                    
+                    cursor.execute(query, tuple(params))
                     return cursor.fetchone()
                 except pymysql.Error as e:
-                    logging.error(f"Database error while fetching shared file record: {e}")
-                    return None
-                  
-    def get_files_by_owner(self, owner_id):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute("SELECT file_name FROM files WHERE owner_id = %s AND is_public = FALSE", (owner_id,))
-                    return cursor.fetchall()
-                except Exception as e:
-                    logging.error(f"Failed to get files for owner {owner_id}: {e}")
-                    return []
+                    logging.error(f"Error fecthing file record: {e}")
+                    return None                   
+    
+    def update_file_record(self, file_id, is_public=None, recipient_id=None):
+        updates = []
+        params = []
 
-    def get_public_files(self):
+        if is_public is not None:
+            updates.append("is_public = %s")
+            params.append(is_public)
+        
+        if recipient_id is not None:
+            updates.append("recipient_id = %s")
+            params.append(recipient_id)
+
+        if not updates:
+            return False
+
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    cursor.execute("SELECT file_id, file_name FROM files WHERE is_public = TRUE")
-                    return cursor.fetchall()
-                except Exception as e:
-                    logging.error(f"Failed to get public files: {e}")
-                    return []
-    
-    def update_file_visibility(self, file_id, new_is_public):
-        with self.db_pool.get_connection() as conn:
-            with conn.cursor() as cursor:
-                try:
-                    cursor.execute(
-                        "UPDATE files SET is_public = %s WHERE file_id = %s",
-                        (new_is_public, file_id)
-                    )
+                    sql = f"UPDATE files SET {', '.join(updates)} WHERE file_id = %s"
+                    params.append(file_id)
+                    cursor.execute(sql, tuple(params))
                     return cursor.rowcount > 0
                 except Exception as e:
-                    logging.error(f"Error updating file visibility: {e}", exc_info=True)
+                    logging.error(f"Database error updating file {file_id}: {e}")
                     return False
+                
+    def update_user_record(self, user_id, password=None, role=None, session_id=None):
+        """
+        Generic user update. Dynamically builds the SET clause based on provided args.
+        Supports updating password (with hashing), role, and session_id.
+        """
+        updates = []
+        params = []
+
+        if password:
+            hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+            updates.append("password_hash = %s")
+            params.append(hashed)
+        
+        if role:
+            updates.append("role = %s")
+            params.append(role)
+            
+        if session_id is not None:
+            updates.append("session_id = %s")
+            params.append(session_id)
+
+        if not updates:
+            return False
+
+        sql = f"UPDATE users SET {', '.join(updates)} WHERE id = %s"
+        params.append(user_id)
+
+        try:
+            with self.db_pool.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, tuple(params))
+                    return cursor.rowcount > 0
+        except Exception as e:
+            logging.error(f"Database error updating user {user_id}: {e}")
+            return False
     
-    def delete_file(self, file_id, user_id, user_role):
+    def delete_file_record(self, file_id, owner_id=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
-                    file_record = self.get_file_record_by_id(file_id=file_id)
-                    if not file_record:
-                        logging.warning(f"File ID {file_id} not found.")
-                        return None, None, None
-
-                    file_name = file_record['file_name']
-                    owner_id = file_record['owner_id']
-
-                    if user_role == 'admin':
-                        if not file_record['is_public']:
-                            logging.warning(f"Admin attempted to delete a non-public file with ID {file_id}.")
-                            return None, None, None
-
-                        cursor.execute("DELETE FROM files WHERE file_id = %s", (file_id,))
-                        if cursor.rowcount == 1:
-                            logging.info(f"Public file record (ID: {file_id}) deleted by an admin.")
-                            return file_name, owner_id, file_record['is_public']
-                        else:
-                            return None, None, None
+                    query = "DELETE FROM files WHERE file_id = %s"
+                    params = [file_id]
+                    
+                    if owner_id:
+                        query += " AND owner_id = %s"
+                        params.append(owner_id)
+                        
+                    cursor.execute(query, tuple(params))
+                    success = cursor.rowcount == 1
+                    
+                    if success:
+                        logging.info(f"Successfully delete file record with ID {file_id}.")
                     else:
-                        cursor.execute(
-                            "DELETE FROM files WHERE file_id = %s AND owner_id = %s",
-                            (file_id, user_id)
-                        )
-                        if cursor.rowcount == 1:
-                            logging.info(f"File record (ID: {file_id}) deleted successfully by owner (ID: {user_id}).")
-                            return file_name, owner_id, file_record['is_public']
-                        else:
-                            logging.warning(f"File ID {file_id} not found or user {user_id} is not the owner.")
-                            return None, None, None
+                        logging.warning(f"Delete attempted for file ID {file_id}, but no record was matched.")
+                    return success
+                                
                 except Exception as e:
-                    logging.error(f"Failed to delete file record: {e}", exc_info=True)
-                    return None, None, None
-            
+                    logging.error(f"Database error during file deletion (ID: {file_id}): {e}")
+                    return False
+                                    
