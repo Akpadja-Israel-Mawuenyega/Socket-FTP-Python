@@ -31,6 +31,28 @@ class DatabaseManager:
             logging.critical(f"Error initializing MySQL connection pool: {e}", exc_info=True)
             sys.exit(1)
             
+    def create_files_table_if_not_exists(self):
+        with self.db_pool.get_connection() as conn:
+            with conn.cursor() as cursor:
+                try:
+                    create_table_sql = """
+                    CREATE TABLE IF NOT EXISTS files (
+                        file_id INT AUTO_INCREMENT PRIMARY KEY,
+                        owner_id INT NOT NULL,
+                        file_name VARCHAR(255) NOT NULL,
+                        file_size BIGINT NOT NULL,
+                        is_public BOOLEAN DEFAULT FALSE,
+                        recipient_id INT NULL,
+                        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (owner_id) REFERENCES users(id),
+                        FOREIGN KEY (recipient_id) REFERENCES users(id)
+                    )
+                    """
+                    cursor.execute(create_table_sql)
+                    logging.info("Files database table ensured.")
+                except Exception as e:
+                    logging.critical(f"Error creating files table: {e}", exc_info=True)        
+            
     def create_user_table_if_not_exists(self):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
@@ -63,15 +85,15 @@ class DatabaseManager:
                     logging.error(f"Error registering user '{username}': {e}", exc_info=True)
                     return False             
     
-    def get_user_record(self, user_id=None, username=None, fields="id, username, password_hash, role, session_id"):
+    def get_user_record(self, user_id=None, username=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
                     if user_id:
-                        query = f"SELECT {fields} FROM users WHERE id = %s"
+                        query = f"SELECT * FROM users WHERE id = %s"
                         params = (user_id,)
                     elif username:
-                        query = f"SELECT {fields} FROM users WHERE username = %s"
+                        query = f"SELECT * FROM users WHERE username = %s"
                         params = (username,)
                     else:
                         return None
@@ -172,23 +194,23 @@ class DatabaseManager:
                     logging.error(f"Database error updating file {file_id}: {e}")
                     return False
                 
-    def update_user_record(self, user_id, password=None, role=None, session_id=None):
+    def update_user_record(self, user_id, username=None, password=None, session_id=None):
         """
         Generic user update. Dynamically builds the SET clause based on provided args.
-        Supports updating password (with hashing), role, and session_id.
+        Supports updating password (with hashing), and session_id.
         """
         updates = []
         params = []
 
+        if username:
+            updates.append("username = %s")
+            params.append(username)
+                
         if password:
             hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
             updates.append("password_hash = %s")
             params.append(hashed)
         
-        if role:
-            updates.append("role = %s")
-            params.append(role)
-            
         if session_id is not None:
             updates.append("session_id = %s")
             params.append(session_id)
@@ -231,4 +253,12 @@ class DatabaseManager:
                 except Exception as e:
                     logging.error(f"Database error during file deletion (ID: {file_id}): {e}")
                     return False
-                                    
+                
+    def close_pool(self):
+        """Manually dispose all connections in the pool"""
+        if self.db_pool:
+            try:     
+                self.db_pool = None           
+                logging.info("Database connection pool disposed.")
+            except Exception as e:
+                logging.error(f"Error disposing connection pool: {e}")

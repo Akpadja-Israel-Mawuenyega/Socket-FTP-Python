@@ -1,6 +1,7 @@
 import bcrypt
 import uuid
 import logging
+import threading
 from user_management import DatabaseManager
 from datetime import datetime
 
@@ -8,6 +9,7 @@ class ServerAuthHandler:
     def __init__(self, db_manager: DatabaseManager, config):
         self.db_manager = db_manager
         self.sessions = {}
+        self.session_lock = threading.Lock()
         self.config = config
         
         # Pull constants from config for consistency
@@ -30,7 +32,6 @@ class ServerAuthHandler:
             if not username or not password:
                 return self.REGISTER_FAILED_RESPONSE
             
-            # Use the existing check from db_manager or local check
             if self.db_manager.get_user_record(username=username):
                 logging.warning(f"Registration failed: User '{username}' already exists.")
                 return self.REGISTER_FAILED_RESPONSE
@@ -48,24 +49,20 @@ class ServerAuthHandler:
         try:
             user = self.db_manager.get_user_record(username=username)
             
-            # Verify password against hash
             if user and bcrypt.checkpw(password.encode('utf-8'), user['password_hash'].encode('utf-8')):
                 session_id = str(uuid.uuid4())
                 
-                # Store session in-memory for fast access
-                self.sessions[session_id] = {
-                    'username': username, 
-                    'role': user['role'], 
-                    'user_id': user['id']
-                }
+                with self.session_lock:
+                    self.sessions[session_id] = {
+                        'username': username, 
+                        'role': user['role'], 
+                        'user_id': user['id']
+                    }
                 
-                # Sync session with DB (optional, for persistent sessions)
                 self.db_manager.update_user_record(user['id'], session_id=session_id)
 
                 logging.info(f"User '{username}' (ID: {user['id']}) logged in.")
                 
-                # IMPORTANT: Return all 5 parts required by ClientHandler
-                # Format: SUCCESS|SESSION_ID|USERNAME|ROLE|USER_ID
                 return (f"{self.LOGIN_SUCCESS_RESPONSE}{self.separator}"
                         f"{session_id}{self.separator}"
                         f"{username}{self.separator}"
@@ -79,7 +76,9 @@ class ServerAuthHandler:
 
     def logout_user(self, session_id):
         """Removes session and clears it from DB."""
-        session_data = self.sessions.pop(session_id, None)
+        with self.session_lock:
+            session_data = self.sessions.pop(session_id, None)
+        
         if session_data:
             self.db_manager.update_user_record(session_data['user_id'], session_id=None)
             logging.info(f"User '{session_data['username']}' logged out.")
@@ -88,8 +87,10 @@ class ServerAuthHandler:
 
     def is_valid_session(self, session_id):
         """Check if session exists in memory."""
-        return session_id in self.sessions
+        with self.session_lock:
+            return session_id in self.sessions
 
     def get_session_data(self, session_id):
         """Returns the full session dict: username, role, user_id."""
-        return self.sessions.get(session_id)
+        with self.session_lock:
+            return self.sessions.get(session_id)

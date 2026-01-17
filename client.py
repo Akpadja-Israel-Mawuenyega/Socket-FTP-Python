@@ -72,9 +72,14 @@ class FileTransferClient:
                 return
             while True:
                 if not self.session_id:
-                    choice = input(f"[{self.username}:{self.user_role}] > Enter '1' to login, '2' to register, 'q' to quit: ")
+                    choice = input("Enter '1' to login, '2' to register, 'q' to quit: ")
+                    
                     if choice == '1':
-                        success, session_id, username, role = self.auth_handler.login()
+                        u = input("Enter your username (Must be unique): ")
+                        p = input("Enter password: ")
+                        
+                        success, session_id, username, role = self.auth_handler.login(u, p)
+                        
                         if success:
                             self.session_id = session_id
                             self.username = username
@@ -82,404 +87,182 @@ class FileTransferClient:
                             self.downloads_dir = os.path.join(self.downloads_base_dir, self.username)
                             os.makedirs(self.downloads_dir, exist_ok=True)
                             logging.info(f"User-specific download directory set to: {os.path.abspath(self.downloads_dir)}")
+
                     elif choice == '2':
-                        self.auth_handler.register()
+                        u = input("Choose a username (Must be unique): ")
+                        p = input("Choose a password: ")
+                        
+                        self.auth_handler.register(u, p)
                     elif choice.lower() == 'q':
                         break
                     else:
                         logging.warning("Invalid choice.")
                 else:
-                    command_raw = input(f"[{self.username}:{self.user_role}] > ")
-                    command_parts = command_raw.split(self.separator)
-                    command = command_parts[0]
-                    args = command_parts[1:]
+                    user_input = input(f"[{self.username}] > ").strip()
+                    if not user_input: continue
                     
-                    if command.lower() == 'logout':
-                        self.auth_handler.logout(self.session_id)
-                        self.session_id = None
-                        self.username = None
-                        self.user_role = None
-                    elif command.lower() == 'quit':
-                        self.auth_handler.logout(self.session_id)
+                    parts = user_input.split(self.separator)
+                    cmd_raw = parts[0].upper()
+                    args = parts[1:]
+
+                    if "LIST_" in cmd_raw:
+                        self.handle_list(cmd_raw)
+
+                    elif "DOWNLOAD" in cmd_raw:
+                        if args: self.handle_file_download(args[0])
+                        else: print("Usage: DOWNLOAD<SEPARATOR>FILE_ID")
+
+                    elif "MAKE_" in cmd_raw:
+                        if len(args) >= 1:
+                            target = args[1] if len(args) > 1 else None
+                            self.handle_file_action(cmd_raw, args[0], target)
+                        else: print("Usage: MAKE_...<SEPARATOR>FILE_ID<SEPARATOR>[TARGET_USER]")
+
+                    elif "DELETE" in cmd_raw:
+                        if args: self.handle_file_action(cmd_raw, args[0])
+                        else: print("Usage: DELETE<SEPARATOR>FILE_ID")
+
+                    elif "UPLOAD" in cmd_raw:
+                        if len(args) >= 1:
+                            file_path = args[0]
+                            recipient = args[1] if len(args) > 1 else None
+                            
+                            self.handle_file_upload(cmd_raw, file_path, recipient)
+                        else:
+                            print("Usage: UPLOAD_<TYPE><SEPARATOR>local_path<SEPARATOR>[recipient_username]")
+
+                    elif cmd_raw == "LOGOUT":
+                        if self.auth_handler.logout(self.session_id):
+                            self.session_id = None
+                            self.username = None
+                            self.user_role = None
+                            logging.info("Logged out successfully.")
+                        else:
+                            logging.error("Logout failed on server side.")
+                    elif cmd_raw == "QUIT":
+                        if self.session_id:
+                            self.auth_handler.logout(self.session_id)
                         break
-                    elif command.lower() == self.config['COMMANDS']['UPLOAD_PRIVATE'].lower():
-                        if len(args) == 1:
-                            self.handle_upload(args[0], private=True, public=False)
-                        else:
-                            logging.warning("Usage: UPLOAD_PRIVATE<SEP>filename")
-                    elif command.lower() == self.config['COMMANDS']['UPLOAD_PUBLIC'].lower():
-                        if len(args) == 1:
-                            self.handle_upload(args[0], private=False, public=True)
-                        else:
-                            logging.warning("Usage: UPLOAD_PUBLIC<SEP>filename")        
-                    elif command.lower() == self.config['COMMANDS']['UPLOAD_FOR_SHARING'].lower():
-                        if len(args) == 2:
-                            recipient_username = args[1]
-                            self.handle_upload(args[0], private=False, public=False, recipient_username=recipient_username)
-                        else:
-                            logging.warning("Usage: UPLOAD_FOR_SHARING<SEP>filename<SEP>recipient_username")
-                    elif command.lower() == self.config['COMMANDS']['DOWNLOAD_PRIVATE'].lower():
-                        if len(args) == 1:
-                            self.handle_download_private(args[0])
-                        else:
-                            logging.warning("Usage: DOWNLOAD_PRIVATE<SEP>filename")
-                    elif command.lower() == self.config['COMMANDS']['LIST_PRIVATE'].lower():
-                        self.list_private_files()
-                    elif command.lower() == self.config['COMMANDS']['DOWNLOAD_SERVER_PUBLIC'].lower():
-                        if len(args) == 1:
-                            self.handle_download_public(args[0])
-                        else:
-                            logging.warning("Usage: DOWNLOAD_SERVER_PUBLIC<SEP>filename")
-                    elif command.lower() == self.config['COMMANDS']['LIST_SHARED'].lower():
-                        self.list_shared_files()
-                    elif command.lower() == self.config['COMMANDS']['LIST_PUBLIC'].lower():
-                        self.list_public_files()    
-                    elif command.lower() == self.config['COMMANDS']['DOWNLOAD_SHARED'].lower():
-                        if len(args) == 1:
-                            self.handle_download_shared(args[0])
-                        else:
-                            logging.warning("Usage: DOWNLOAD_SHARED<SEP>owner_username/filename")
-                    elif command.lower() == self.config['COMMANDS']['MAKE_PUBLIC_ADMIN'].lower():
-                        if self.user_role == 'admin':
-                            if len(args) == 2:
-                                self.make_public_admin(args[0], args[1])
-                            else:
-                                logging.warning("Usage: MAKE_PUBLIC_ADMIN<SEP>owner_username<SEP>filename")
-                        else:
-                            logging.warning("Permission denied.")
-                    elif command.lower() == self.config['COMMANDS']['MAKE_PUBLIC_USER'].lower():
-                        if self.user_role in ['user', 'admin']:
-                            if len(args) == 1:
-                                self.make_public_user(args[0])
-                            else:
-                                logging.warning("Usage: MAKE_PUBLIC_USER<SEP>filename")
-                        else:
-                            logging.warning("Permission denied.")
-                    elif command.lower() == self.config['COMMANDS']['MAKE_SHARED_USER'].lower():
-                        if self.user_role in ['user', 'admin']:
-                            if len(args) == 2:
-                                self.make_shared_user(args[0], args[1])
-                            else:
-                                logging.warning("Usage: MAKE_SHARED_USER<SEP>filename")
-                        else:
-                            logging.warning("Permission denied.")
-                    elif command.lower() == self.config['COMMANDS']['ADMIN_DELETE_FILE'].lower():
-                        if self.user_role == 'admin':
-                            if len(command_parts) > 1:
-                                file_name = command_parts[1]
-                                self.admin_delete_public_file(file_name)
-                            else:
-                                logging.warning("Usage: ADMIN_DELETE_FILE<SEPARATOR>file_name")   
-                        else:
-                            logging.warning("Permission denied.")
-                    else:
-                        logging.warning("Unknown command.")        
-        except KeyboardInterrupt:
-            logging.info("Exiting interactive session.")
-        finally:
-            if self.secure_socket:
-                self.secure_socket.close()
-            logging.info("Disconnected from server.")
+        except Exception as e:
+            logging.error(f"An error during user session: {e}")        
+                            
+    def send_command(self, cmd_name, *args):
+        """
+        One method to rule them all. 
+        Automatically injects session_id and sends any number of arguments.
+        """
+        cmd_value = self.config['COMMANDS'].get(cmd_name, cmd_name)
+        request = self.separator.join([cmd_value, str(self.session_id)] + list(args))
+        
+        self.secure_socket.sendall(request.encode('utf-8'))
+        response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
+        return response.split(self.separator)
+
+    def handle_list(self, cmd_name):
+        parts = self.send_command(cmd_name)
+        status = parts[0]
+
+        if status == "LIST_SUCCESS":
+            print(f"\n--- {cmd_name.replace('_', ' ')} ---")
+            file_entries = parts[1:]
+            for i in range(0, len(file_entries), 2):
+                f_id = file_entries[i]
+                f_name = file_entries[i+1] if (i+1) < len(file_entries) else "Unknown"
+                print(f" [{f_id}] {f_name}")
+                
+            print("-" * 20)
+        elif status in ["LIST_EMPTY", self.config['RESPONSES'].get('NO_FILES_PUBLIC')]:
+            logging.info("No files found in this category.")
+        else:
+            logging.error(f"Server returned: {status}")
     
-    def is_safe_filename(self, filename):
-        if not filename or ".." in filename or "/" in filename or "\\" in filename:
-            logging.error("Invalid filename. Filenames cannot contain '..', '/', or '\\'.")
-            return False
-        return True        
-
-    def handle_upload(self, file_path, private, public, recipient_username=None):
-        if not os.path.isfile(file_path):
-            logging.error(f"File not found: {file_path}")
-            return
-        
-        file_size = os.path.getsize(file_path)
-        file_name = os.path.basename(file_path)
-        
-        if not self.is_safe_filename(file_name):
-            logging.error(f"Filename '{file_name}' contains invalid characters.")
-            return
-
-        if private:
-            command = self.config['COMMANDS']['UPLOAD_PRIVATE']
-        elif public:
-            command = self.config['COMMANDS']['UPLOAD_PUBLIC']
-        else:
-            command = self.config['COMMANDS']['UPLOAD_FOR_SHARING']
-            if recipient_username:
-                command = f"{command}{self.separator}{recipient_username}"
-              
-        full_command = f"{command}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{file_size}"
-        self.secure_socket.sendall(full_command.encode())
-        
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-
-        if status == self.config['RESPONSES']['READY_FOR_DATA']:
-            logging.info("Server is ready for upload. Initiating transfer.")
-            self.transfer_file(file_path)
-        else:
-            logging.error(f"Server refused upload: {response}")
-
-    def handle_download_private(self, file_name):
-        command = f"{self.config['COMMANDS']['DOWNLOAD_PRIVATE']}{self.separator}{self.session_id}{self.separator}{file_name}"
-        self.secure_socket.sendall(command.encode())
-        
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-        
-        if status == self.config['RESPONSES']['DOWNLOAD_READY']:
-            file_name_from_server = parts[1]
-            file_size = int(parts[2])
-            logging.info("Server is ready for download. Initiating transfer.")
-            
-            safe_file_name = os.path.basename(file_name_from_server)
-            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
-            resolved_path = os.path.abspath(local_file_path)
-            
-            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
-                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
-                self.secure_socket.close()
-                return
-            
-            self.receive_file(resolved_path, file_size)
-            
-        elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
-            logging.error(f"File '{file_name}' not found on server.")
-        else:
-            logging.error(f"Unexpected server response for download: {response}")
-
-    def handle_download_public(self, file_name):
-        command = f"{self.config['COMMANDS']['DOWNLOAD_SERVER_PUBLIC']}{self.separator}{file_name}"
-        self.secure_socket.sendall(command.encode())
-        
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-        
-        if status == self.config['RESPONSES']['DOWNLOAD_READY']:
-            file_name_from_server = parts[1]
-            file_size = int(parts[2])
-            logging.info("Server is ready for download. Initiating transfer.")
-            
-            safe_file_name = os.path.basename(file_name_from_server)
-            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
-            resolved_path = os.path.abspath(local_file_path)
-            
-            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
-                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
-                self.secure_socket.close()
-                return
-            
-            self.receive_file(resolved_path, file_size)
-
-        elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
-            logging.error(f"File '{file_name}' not found on server.")
-        else:
-            logging.error(f"Unexpected server response for download: {response}")
-
-    def handle_download_shared(self, owner_and_file_name):
-        if not self.session_id:
-            logging.warning("Please log in to download shared files.")
-            return
-
-        command = f"{self.config['COMMANDS']['DOWNLOAD_SHARED']}{self.separator}{self.session_id}{self.separator}{owner_and_file_name}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-        
-        if status == self.config['RESPONSES']['DOWNLOAD_READY']:
-            file_name_from_server = parts[1]
-            file_size = int(parts[2])
-            logging.info("Server is ready for download. Initiating transfer.")
-            
-            safe_file_name = os.path.basename(file_name_from_server)
-            local_file_path = os.path.join(self.downloads_dir, safe_file_name)
-            resolved_path = os.path.abspath(local_file_path)
-            
-            if not resolved_path.startswith(os.path.abspath(self.downloads_dir)):
-                logging.error(f"Server tried to send a file with a malicious path: {file_name_from_server}")
-                self.secure_socket.close()
-                return
-            
-            self.receive_file(resolved_path, file_size)
-            
-        elif status == self.config['RESPONSES']['FILE_NOT_FOUND']:
-            logging.error(f"File '{owner_and_file_name}' not found on server.")
-        else:
-            logging.error(f"Unexpected server response for download: {response}")
-
     def transfer_file(self, file_path):
+        """
+        Reads a local file and streams bytes to the server.
+        Uses tqdm for a visual progress bar in the CLI.
+        """
         try:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
             
             with open(file_path, "rb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Sending {file_name}") as progress:
+                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, 
+                            unit_divisor=1024, desc=f"Uploading {file_name}") as progress:
+                    
                     while True:
                         bytes_read = f.read(self.buffer_size)
                         if not bytes_read:
                             break
+                        
                         self.secure_socket.sendall(bytes_read)
+                        
                         progress.update(len(bytes_read))
             
             final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
-            logging.info(f"Server response after upload: {final_response}")
+            logging.info(f"Server Confirmation: {final_response}")
+            
         except Exception as e:
-            logging.error(f"Error during file upload data transfer: {e}", exc_info=True)
+            logging.error(f"Error during file transfer: {e}", exc_info=True)
+    
+    def handle_file_upload(self, cmd_key, file_path, recipient_username=None):
+        if not os.path.isfile(file_path):
+            logging.error(f"File not found: {file_path}")
+            return
+
+        file_size = os.path.getsize(file_path)
+        file_name = os.path.basename(file_path)
+
+        upload_args = [file_name, str(file_size)]
+        if recipient_username:
+            upload_args.insert(0, recipient_username)
+
+        parts = self.send_command(cmd_key, *upload_args)
+        status = parts[0]
+
+        if status == self.config['RESPONSES']['READY_FOR_DATA']:
+            logging.info(f"Server ready. Transferring {file_name}...")
+            self.transfer_file(file_path)
+        else:
+            logging.error(f"Server refused upload: {status}")        
 
     def receive_file(self, full_file_path, file_size):
         try:
             with open(full_file_path, "wb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024, desc=f"Receiving {os.path.basename(full_file_path)}") as progress:
+                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, 
+                            desc=f"Downloading {os.path.basename(full_file_path)}") as progress:
                     bytes_received = 0
                     while bytes_received < file_size:
                         bytes_to_read = min(self.buffer_size, file_size - bytes_received)
-                        bytes_read = self.secure_socket.recv(bytes_to_read)
-                        if not bytes_read:
-                            break
-                        f.write(bytes_read)
-                        bytes_received += len(bytes_read)
-                        progress.update(len(bytes_read))
+                        chunk = self.secure_socket.recv(bytes_to_read)
+                        if not chunk: break
+                        f.write(chunk)
+                        bytes_received += len(chunk)
+                        progress.update(len(chunk))
             
-            if bytes_received == file_size:
-                final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
-                if final_response.startswith(self.config['RESPONSES']['DOWNLOAD_COMPLETE']):
-                    return True
-                else:
-                    os.remove(full_file_path)
-                    return False
-            else:
-                os.remove(full_file_path)
-                return False
-
+            self.secure_socket.recv(self.buffer_size) 
+            return True
         except Exception as e:
-            if os.path.exists(full_file_path):
-                os.remove(full_file_path)
+            logging.error(f"Download failed: {e}")
+            if os.path.exists(full_file_path): os.remove(full_file_path)
             return False
-    
-    def list_public_files(self):
-        command = f"{self.config['COMMANDS']['LIST_PUBLIC']}{self.separator}{self.session_id}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
+        
+    def handle_file_download(self, file_id):
+        parts = self.send_command('DOWNLOAD_PRIVATE', file_id)
         status = parts[0]
 
-        if status == self.config['RESPONSES']['LIST_SUCCESS']:
-            file_info_list = parts[1:]
-            logging.info("--- Public Files ---")
-            
-            for file_info in file_info_list:
-                file_id, file_name = file_info.split(',')
-                logging.info(f" - ID: {file_id}, Name: {file_name}")
-                
-        elif status == self.config['RESPONSES']['NO_FILES_PUBLIC']:
-            logging.info("No public files found.")
+        if status == self.config['RESPONSES']['DOWNLOAD_READY']:
+            filename, size = parts[1], int(parts[2])
+            local_path = os.path.join(self.downloads_dir, filename)
+            self.receive_file(local_path, size)
         else:
-            logging.error(f"Unexpected response from server: {response}")
-    
-    def list_private_files(self):
-        command = f"{self.config['COMMANDS']['LIST_PRIVATE']}{self.separator}{self.session_id}"
-        self.secure_socket.sendall(command.encode())
+            logging.error(f"Download failed: {status}")
 
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-
-        if status == self.config['RESPONSES']['PRIVATE_LIST']:
-            file_list = parts[1:]
-            logging.info("--- Your Private Files ---")
-            if not file_list:
-                logging.info("No private files found.")
-            for f in file_list:
-                logging.info(f" - {f}")
-        elif status == self.config['RESPONSES']['NO_FILES_PRIVATE']:
-            logging.info("No private files found.")
-        else:
-            logging.error(f"Unexpected response from server: {response}")
-
-    def list_shared_files(self):
-        command = f"{self.config['COMMANDS']['LIST_SHARED']}{self.separator}{self.session_id}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        parts = response.split(self.separator)
-        status = parts[0]
-
-        if status == self.config['RESPONSES']['SHARED_LIST']:
-            file_list = parts[1:]
-            logging.info("--- Shared Files ---")
-            if not file_list:
-                logging.info("No files are currently shared.")
-            for f in file_list:
-                logging.info(f" - {f}")
-        elif status == self.config['RESPONSES']['NO_FILES_SHARED']:
-            logging.info("No files are currently shared.")
-        else:
-            logging.error(f"Unexpected response from server: {response}")
-
-    def make_public_admin(self, owner_username, file_name):
-        if self.user_role != 'admin':
-            logging.warning("Permission denied. You must be an admin to use this command.")
-            return
-
-        command = f"{self.config['COMMANDS']['MAKE_PUBLIC_ADMIN']}{self.separator}{self.session_id}{self.separator}{owner_username}{self.separator}{file_name}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        logging.info(f"Server response: {response}")
-
-    def make_public_user(self, file_name):
-        if not self.session_id:
-            logging.warning("Please log in to make a file public.")
-            return
+    def handle_file_action(self, cmd_name, file_id, target=None):
+        args = [file_id]
+        if target: args.append(target)
         
-        command = f"{self.config['COMMANDS']['MAKE_PUBLIC_USER']}{self.separator}{self.session_id}{self.separator}{file_name}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        logging.info(f"Server response: {response}")
-        
-    def make_shared_user(self, file_name, recipient_username):
-        if not self.session_id:
-            logging.warning("Please log in to make a file shared.")
-            return None
-        
-        command = f"{self.config['COMMANDS']['MAKE_SHARED_USER']}{self.separator}{self.session_id}{self.separator}{file_name}{self.separator}{recipient_username}"
-        self.secure_socket.sendall(command.encode())
-
-        response = self.secure_socket.recv(self.buffer_size).decode().strip()
-        logging.info(f"Server response: {response}") 
-        return response
-    
-    def admin_delete_public_file(self, file_name):
-        if not self.session_id:
-            print("You must be logged in to delete files.")
-            return
-
-        command = self.config['COMMANDS']['ADMIN_DELETE_FILE']
-        request = f"{command}{self.separator}{self.session_id}{self.separator}{file_name}"
-        
-        try:
-            self.secure_socket.sendall(request.encode())
-            response = self.secure_socket.recv(self.buffer_size).decode()
-            
-            status, *message = response.split(self.separator)
-            
-            if status == self.config['RESPONSES']['ADMIN_DELETE_SUCCESS']:
-                print(f"Server response: {' '.join(message)}")
-            elif status == self.config['RESPONSES']['ADMIN_DELETE_FAILED']:
-                print(f"Server response: {' '.join(message)}")
-            else:
-                print(f"Unknown server response: {response}")
-        except FileNotFoundError as f:
-            print(f"File not found: {f}")
-        except Exception as e:
-            logging.error(f"Failed to send delete command: {e}")       
+        parts = self.send_command(cmd_name, *args)
+        print(f"Server: {parts[0]}")      
         
 def main():
     config = read_config()

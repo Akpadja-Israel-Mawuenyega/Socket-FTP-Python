@@ -117,6 +117,8 @@ def main():
     except Exception as e:
         logging.critical(f"Server application error: {e}", exc_info=True)
     finally:
+        if 'db_manager' in locals():
+            db_manager.close_pool()
         if 'server_socket' in locals() and server_socket:
             server_socket.close()
 
