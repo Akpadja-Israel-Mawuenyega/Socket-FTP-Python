@@ -87,7 +87,7 @@ class ClientHandler(threading.Thread):
                     self.handle_file_list(command)
 
                 # DOWNLOAD
-                elif command in [self.cmds['DOWNLOAD_PRIVATE'], self.cmds['DOWNLOAD_SHARED'], self.cmds['DOWNLOAD_SERVER_PUBLIC']]:
+                elif command in [self.cmds['DOWNLOAD_PRIVATE'], self.cmds['DOWNLOAD_SHARED'], self.cmds['DOWNLOAD_PUBLIC']]:
                     self.handle_file_download(parts[2])
 
                 # UPLOAD
@@ -122,15 +122,25 @@ class ClientHandler(threading.Thread):
         query_map = {
             self.cmds['LIST_PUBLIC']: {'is_public': True},
             self.cmds['LIST_SHARED']: {'recipient_id': self.user_id, 'is_public': False},
-            self.cmds['LIST_PRIVATE']: {'owner_id': self.user_id, 'is_public': False}
+            self.cmds['LIST_PRIVATE']: {
+                'owner_id': self.user_id, 
+                'is_public': False,
+                'exclude_recipient': True,
+    }
         }
 
         filters = query_map.get(cmd, {'owner_id': self.user_id})
         files = self.db_manager.get_files(**filters)
 
         if not files:
-            empty_key = 'NO_FILES_PUBLIC' if 'PUBLIC' in cmd else 'NO_FILES_PRIVATE'
-            self.send_response(self.response.get(empty_key, "LIST_EMPTY"))
+            if 'PUBLIC' in cmd:
+                response_key = 'NO_FILES_PUBLIC'
+            elif 'SHARED' in cmd:
+                response_key = 'NO_FILES_SHARED'
+            else:
+                response_key = 'NO_FILES_PRIVATE'
+                
+            self.send_response(self.response.get(response_key, "LIST_EMPTY"))
         else:
             flat_list = []
             for f in files:
@@ -280,7 +290,7 @@ class ClientHandler(threading.Thread):
         return os.path.join(self.upload_dir, self.username, record['file_name'])
 
     def send_response(self, response):
-        self.client_socket.sendall(f"{response}{self.separator}".encode('utf-8'))
+        self.client_socket.sendall(f"{response}".encode('utf-8'))
 
     def cleanup(self):
         self.client_socket.close()

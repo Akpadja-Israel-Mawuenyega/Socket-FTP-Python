@@ -36,7 +36,7 @@ class ServerAuthHandler:
                 logging.warning(f"Registration failed: User '{username}' already exists.")
                 return self.REGISTER_FAILED_RESPONSE
             
-            if self.db_manager.register_user(username, password):
+            if self.db_manager.create_user(username, password):
                 logging.info(f"User '{username}' registered successfully.")
                 return self.REGISTER_SUCCESS_RESPONSE
             return self.REGISTER_FAILED_RESPONSE
@@ -69,10 +69,12 @@ class ServerAuthHandler:
                         f"{user['role']}{self.separator}"
                         f"{user['id']}")
             
+            logging.warning(f"Failed login attempt for username: {username}")
             return self.LOGIN_FAILED_RESPONSE
+
         except Exception as e:
             logging.error(f"Login Error: {e}")
-            return f"{self.ERROR_RESPONSE}{self.separator}{str(e)}"
+            return self.LOGIN_FAILED_RESPONSE
 
     def logout_user(self, session_id):
         """Removes session and clears it from DB."""

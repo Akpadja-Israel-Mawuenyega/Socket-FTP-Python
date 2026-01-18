@@ -162,19 +162,21 @@ class FileTransferClient:
         parts = self.send_command(cmd_name)
         status = parts[0]
 
-        if status == "LIST_SUCCESS":
+        if status == self.config['RESPONSES']['LIST_SUCCESS']:
             print(f"\n--- {cmd_name.replace('_', ' ')} ---")
             file_entries = parts[1:]
             for i in range(0, len(file_entries), 2):
                 f_id = file_entries[i]
                 f_name = file_entries[i+1] if (i+1) < len(file_entries) else "Unknown"
                 print(f" [{f_id}] {f_name}")
-                
-            print("-" * 20)
-        elif status in ["LIST_EMPTY", self.config['RESPONSES'].get('NO_FILES_PUBLIC')]:
-            logging.info("No files found in this category.")
+            print("-" * 25)
+
+        elif status.startswith("NO_FILES") or status == "LIST_EMPTY":
+            print(f"\nInfo: {status.replace('_', ' ').title()}")
+            logging.info(f"Category '{cmd_name}' is currently empty.")
+
         else:
-            logging.error(f"Server returned: {status}")
+            logging.error(f"Unexpected Server Response: {status}")
     
     def transfer_file(self, file_path):
         """
@@ -199,7 +201,11 @@ class FileTransferClient:
                         progress.update(len(bytes_read))
             
             final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
-            logging.info(f"Server Confirmation: {final_response}")
+
+            if final_response == "UPLOAD_SUCCESS":
+                logging.info("File upload verified and saved successfully!")
+            else:
+                logging.error(f"Server reported an issue after transfer: {final_response}")
             
         except Exception as e:
             logging.error(f"Error during file transfer: {e}", exc_info=True)
@@ -239,7 +245,6 @@ class FileTransferClient:
                         bytes_received += len(chunk)
                         progress.update(len(chunk))
             
-            self.secure_socket.recv(self.buffer_size) 
             return True
         except Exception as e:
             logging.error(f"Download failed: {e}")

@@ -30,7 +30,7 @@ def main():
     admin_username = input("Enter desired admin username: ")
     admin_password = input("Enter desired admin password: ")
 
-    if db_manager.register_user(admin_username, admin_password, role='admin'):
+    if db_manager.create_user(admin_username, admin_password, role='admin'):
         logging.info(f"Admin user '{admin_username}' created successfully!")
     else:
         logging.error(f"Failed to create admin user '{admin_username}'. It might already exist.")

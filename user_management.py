@@ -71,7 +71,7 @@ class DatabaseManager:
                 except Exception as e:
                     logging.critical(f"Error creating user table: {e}", exc_info=True)
 
-    def register_user(self, username, password, role='user'):
+    def create_user(self, username, password, role='user'):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
@@ -79,10 +79,10 @@ class DatabaseManager:
                     cursor.execute("INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s)", (username, password_hash, role))
                     return True
                 except IntegrityError:
-                    logging.warning(f"Registration failed: Username '{username}' already exists.")
+                    logging.warning(f"User account creation failed: Username '{username}' already exists.")
                     return False
                 except pymysql.Error as e:
-                    logging.error(f"Error registering user '{username}': {e}", exc_info=True)
+                    logging.error(f"Error creating user '{username}': {e}", exc_info=True)
                     return False             
     
     def get_user_record(self, user_id=None, username=None):
@@ -119,27 +119,34 @@ class DatabaseManager:
                     logging.error(f"Failed to add file record for {file_name}: {e}.")
                     return False
                 
-    def get_files(self, owner_id=None, is_public=None, recipient_id=None):
+    def get_files(self, owner_id=None, is_public=None, recipient_id=None, exclude_recipient=False):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
                 try:
                     query = "SELECT file_id, file_name, file_size, owner_id FROM files WHERE 1=1"
                     params = []
+
                     if owner_id is not None:
                         query += " AND owner_id = %s"
                         params.append(owner_id)
-                    if recipient_id:
-                        query += " AND recipient_id = %s"
-                        params.append(recipient_id)    
+
+                    if recipient_id is not None:
+                        query += " AND recipient_id = %s AND owner_id != %s"
+                        params.append(recipient_id)
+                        params.append(recipient_id) 
+                    elif exclude_recipient: 
+                        query += " AND recipient_id IS NULL"
+
                     if is_public is not None:
                         query += " AND is_public = %s"
                         params.append(is_public)
+
                     cursor.execute(query, tuple(params))
                     return cursor.fetchall()
                 except Exception as e:
                     logging.error(f"Failed to get file list: {e}")
                     return []
-    
+        
     def get_file_record(self, file_id=None, file_name=None, owner_id=None, recipient_id=None, is_public=None):
         with self.db_pool.get_connection() as conn:
             with conn.cursor() as cursor:
