@@ -17,7 +17,7 @@ def setup_logging(config):
     log_level = getattr(logging, log_level_str, logging.INFO)
     logging.basicConfig(level=log_level, format=log_format)
 
-def read_config(path='config.ini'):
+def read_config(path='client_config.ini'):
     config = configparser.ConfigParser(interpolation=None)
     if not os.path.exists(path):
         logging.critical(f"Config file not found at {path}")
@@ -30,10 +30,10 @@ class FileTransferClient:
         self.host = host
         self.port = port
         self.config = config
-        self.buffer_size = config['SERVER'].getint('BUFFER_SIZE')
-        self.separator = config['SERVER']['SEPARATOR']
-        self.downloads_base_dir = config['CLIENT']['DOWNLOAD_DIR']
-        self.certfile = config['SERVER']['CERTFILE']
+        self.buffer_size = config['CONNECTION'].getint('BUFFER_SIZE')
+        self.separator = config['CONNECTION']['SEPARATOR']
+        self.downloads_base_dir = config['SETTINGS']['DOWNLOAD_DIR']
+        self.certfile = config['CONNECTION']['CERTFILE']
         self.secure_socket = None
         self.session_id = None
         self.username = None
@@ -109,8 +109,8 @@ class FileTransferClient:
                         self.handle_list(cmd_raw)
 
                     elif "DOWNLOAD" in cmd_raw:
-                        if args: self.handle_file_download(args[0])
-                        else: print("Usage: DOWNLOAD<SEPARATOR>FILE_ID")
+                        if args: self.handle_file_download(args[0], cmd_raw)
+                        else: print("Usage: DOWNLOAD_TYPE<SEPARATOR>FILE_ID")
 
                     elif "MAKE_" in cmd_raw:
                         if len(args) >= 1:
@@ -251,8 +251,8 @@ class FileTransferClient:
             if os.path.exists(full_file_path): os.remove(full_file_path)
             return False
         
-    def handle_file_download(self, file_id):
-        parts = self.send_command('DOWNLOAD_PRIVATE', file_id)
+    def handle_file_download(self, file_id, cmd_raw):
+        parts = self.send_command(cmd_raw, file_id)
         status = parts[0]
 
         if status == self.config['RESPONSES']['DOWNLOAD_READY']:
@@ -273,10 +273,10 @@ def main():
     config = read_config()
     setup_logging(config)
     try:
-        host = config['CLIENT'].get('FALLBACK_SERVER_HOST', '127.0.0.1')
-        port = config['CLIENT'].getint('FALLBACK_SERVER_PORT', 8080)
+        host = config['CONNECTION'].get('FALLBACK_SERVER_HOST', '127.0.0.1')
+        port = config['CONNECTION'].getint('FALLBACK_SERVER_PORT', 8080)
         
-        if config['CLIENT'].getboolean('NGROK_AUTODETECT_ENABLED'):
+        if config['CONNECTION'].getboolean('NGROK_AUTODETECT_ENABLED'):
             logging.info("Attempting to detect ngrok public address...")
             try:
                 res = requests.get('http://127.0.0.1:4040/api/tunnels', timeout=2)

@@ -4,8 +4,8 @@ class ClientAuthHandler:
     def __init__(self, config):
         self.client_socket = None
         self.config = config
-        self.separator = config['SERVER']['SEPARATOR']
-        self.buffer_size = config['SERVER'].getint('BUFFER_SIZE')
+        self.separator = config['CONNECTION']['SEPARATOR']
+        self.buffer_size = config['CONNECTION'].getint('BUFFER_SIZE')
         
         self.responses = config['RESPONSES']
         self.cmds = config['COMMANDS']

@@ -11,7 +11,7 @@ from user_management import DatabaseManager
 def setup_logging():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def read_config(path='config.ini'):
+def read_config(path='server_config.ini'):
     config = configparser.ConfigParser(interpolation=None)
     if not os.path.exists(path):
         logging.critical(f"Config file not found at {path}")

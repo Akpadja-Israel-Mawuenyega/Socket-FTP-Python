@@ -39,7 +39,7 @@ def setup_logging(config):
         except Exception as e:
             logging.error(f"Failed to set up file logging: {e}")
 
-def read_config(path='config.ini'):
+def read_config(path='server_config.ini'):
     # read configs
     config = configparser.ConfigParser(interpolation=None)
     if not os.path.exists(path):
