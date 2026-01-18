@@ -111,7 +111,10 @@ class ClientHandler(threading.Thread):
                     if command == self.cmds['LOGOUT']:
                         self.send_response(self.response['LOGOUT_SUCCESS'])
                     break
-
+                else:
+                    logging.warning(f"Unknown command received: {command}")
+                    self.send_response(f"{self.response['UNKNOWN_COMMAND']}")
+                
             except Exception as e:
                 logging.error(f"Command Error: {e}", exc_info=True)
                 self.send_response(f"{self.response['ERROR']}{self.separator}Internal server error.")
@@ -162,14 +165,21 @@ class ClientHandler(threading.Thread):
                 recip_record = self.db_manager.get_user_record(username=recipient_username)
                 recipient_id = recip_record['id'] if recip_record else None
 
-            temp_record = {'file_name': file_name, 'is_public': is_public, 'recipient_id': recipient_id}
+            temp_record = {'file_name': file_name, 'is_public': is_public, 'recipient_id': recipient_id, 'owner_id': self.user_id}
             dest_path = self.resolve_path(temp_record)
             os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
-            self.send_response(self.response['READY_FOR_DATA'])
+            offset = 0
+            if os.path.exists(dest_path):
+                offset = os.path.getsize(dest_path)
+                if offset >= file_size:
+                    offset = 0 
+
+            self.send_response(f"{self.response['READY_FOR_DATA']}{self.separator}{offset}")
             
-            with open(dest_path, "wb") as f:
-                received = 0
+            mode = "ab" if offset > 0 else "wb"
+            with open(dest_path, mode) as f:
+                received = offset
                 while received < file_size:
                     chunk = self.client_socket.recv(min(self.buffer_size, file_size - received))
                     if not chunk: break
@@ -177,38 +187,58 @@ class ClientHandler(threading.Thread):
                     received += len(chunk)
 
             if received == file_size:
-                f = self.db_manager.add_file_record(self.user_id, file_name, file_size, is_public, recipient_id)
-                if f:    
+                existing = self.db_manager.get_file_record(file_name=file_name, owner_id=self.user_id)
+                if existing:
                     self.send_response(self.response['UPLOAD_SUCCESS'])
                 else:
-                    self.send_response(self.response['UPLOAD_FAILED'])
+                    f_record = self.db_manager.add_file_record(self.user_id, file_name, file_size, is_public, recipient_id)
+                    if f_record:    
+                        self.send_response(self.response['UPLOAD_SUCCESS'])
+                    else:
+                        self.send_response(self.response['UPLOAD_FAILED'])
             else:
-                if os.path.exists(dest_path):
-                    os.remove(dest_path)
-                    logging.warning(f"Removed orphaned file {dest_path} due to DB insert failure")
+                logging.warning(f"Transfer interrupted. Partial file saved: {dest_path} ({received}/{file_size})")
                 self.send_response(self.response['UPLOAD_FAILED'])
+                
         except Exception as e:
             self.send_response(f"{self.response['ERROR']}{self.separator}{str(e)}")
 
-    def handle_file_download(self, file_id):
+    def handle_file_download(self, file_id, parts):
         f = self.db_manager.get_file_record(file_id=file_id)
         if not f:
             return self.send_response(self.response['FILE_NOT_FOUND'])
 
         can_access = (f['is_public'] or f['owner_id'] == self.user_id or 
-                      f['recipient_id'] == self.user_id or self.user_role == 'admin')
+                    f['recipient_id'] == self.user_id or self.user_role == 'admin')
 
         if not can_access:
             return self.send_response(self.response['PERMISSION_DENIED'])
 
+        try:
+            requested_offset = int(parts[1]) if len(parts) > 1 else 0
+        except ValueError:
+            requested_offset = 0
+
         path = self.resolve_path(f)
         if os.path.exists(path):
-            self.send_response(f"{self.response['DOWNLOAD_READY']}{self.separator}{f['file_name']}{self.separator}{f['file_size']}")
+            file_size = f['file_size']
+            
+            if requested_offset >= file_size:
+                return self.send_response(f"{self.response['ERROR']}{self.separator}Offset out of range")
+
+            self.send_response(f"{self.response['DOWNLOAD_READY']}{self.separator}{f['file_name']}{self.separator}{file_size}")
+
             with open(path, "rb") as src:
-                self.client_socket.sendfile(src)
+                src.seek(requested_offset)
+                
+                while True:
+                    chunk = src.read(self.buffer_size)
+                    if not chunk:
+                        break
+                    self.client_socket.sendall(chunk)
         else:
             self.send_response(self.response['FILE_NOT_FOUND'])
-
+        
     def handle_file_delete(self, file_id, is_admin_req):
         f = self.db_manager.get_file_record(file_id=file_id)
         if not f:

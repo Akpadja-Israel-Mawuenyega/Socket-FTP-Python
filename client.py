@@ -65,6 +65,57 @@ class FileTransferClient:
         except Exception as e:
             logging.error(f"An unexpected error occurred during connection: {e}")
             return False
+        
+    def show_help(self):
+        print("\n" + "="*60)
+        print(f"{'COMMAND':<20} | {'DESCRIPTION'}")
+        print("-" * 60)
+        
+        for cmd_raw in self.config['COMMANDS'].keys():
+            description = self.get_cmd_description(cmd_raw)
+            print(f"{cmd_raw:<20} | {description}")
+            
+        print("-" * 60)
+        print(f"Usage: COMMAND{self.separator}ARG1{self.separator}ARG2")
+        print("="*60 + "\n")
+    
+    def get_cmd_description(self, key):
+        lookup_key = key.strip().upper()
+        
+        descriptions = {
+            # Uploads
+            'UPLOAD_PRIVATE':      'Upload a file for your private storage',
+            'UPLOAD_PUBLIC':       'Upload a file that anyone can download',
+            'UPLOAD_FOR_SHARING':  'Upload a file specifically for another user',
+            
+            # Downloads
+            'DOWNLOAD_PRIVATE':    'Download one of your private files by ID',
+            'DOWNLOAD_PUBLIC':     'Download a file from the public directory',
+            'DOWNLOAD_SHARED':     'Download a file that was shared with you',
+            
+            # Listings
+            'LIST_PRIVATE':        'View all files you have uploaded',
+            'LIST_PUBLIC':         'View all files available to everyone',
+            'LIST_SHARED':         'View all files shared with you by others',
+            
+            # Permissions & Management
+            'MAKE_PUBLIC_USER':    'Make one of your private files public',
+            'MAKE_PUBLIC_ADMIN':   'Admin: Force a file to be public',
+            'MAKE_SHARED_USER':    'Share a private file with another username',
+            'DELETE_FILE':         'Remove one of your files from the server',
+            'ADMIN_DELETE_FILE':   'Admin: Remove any file from the server',
+            
+            # Session
+            'REGISTER':            'Create a new account',
+            'LOGIN':               'Sign in to your account',
+            'LOGOUT':              'End your current session',
+            'QUIT':                'Exit the application'
+        }
+        
+        return descriptions.get(lookup_key, "No description available")    
+
+    def is_valid_command(self, cmd_raw):
+        return cmd_raw in self.config['COMMANDS']    
 
     def start_interactive_session(self):
         try:
@@ -101,9 +152,17 @@ class FileTransferClient:
                     user_input = input(f"[{self.username}] > ").strip()
                     if not user_input: continue
                     
+                    if user_input.upper() == "HELP":
+                        self.show_help()
+                        continue
+                    
                     parts = user_input.split(self.separator)
                     cmd_raw = parts[0].upper()
                     args = parts[1:]
+                    
+                    if not self.is_valid_command(cmd_raw):
+                        print(f"[!] '{cmd_raw}' is not a recognized command. Type HELP to see list.")
+                        continue
 
                     if "LIST_" in cmd_raw:
                         self.handle_list(cmd_raw)
@@ -143,6 +202,7 @@ class FileTransferClient:
                         if self.session_id:
                             self.auth_handler.logout(self.session_id)
                         break
+
         except Exception as e:
             logging.error(f"An error during user session: {e}")        
                             
@@ -178,18 +238,22 @@ class FileTransferClient:
         else:
             logging.error(f"Unexpected Server Response: {status}")
     
-    def transfer_file(self, file_path):
+    def transfer_file(self, file_path, offset=0):
         """
-        Reads a local file and streams bytes to the server.
-        Uses tqdm for a visual progress bar in the CLI.
+        Streams bytes to the server starting from the given offset.
         """
         try:
             file_size = os.path.getsize(file_path)
             file_name = os.path.basename(file_path)
             
             with open(file_path, "rb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, 
-                            unit_divisor=1024, desc=f"Uploading {file_name}") as progress:
+                if offset > 0:
+                    f.seek(offset)
+                    logging.info(f"Resuming upload from byte {offset}")
+
+                with tqdm.tqdm(total=file_size, initial=offset, unit="B", 
+                            unit_scale=True, unit_divisor=1024, 
+                            desc=f"Uploading {file_name}") as progress:
                     
                     while True:
                         bytes_read = f.read(self.buffer_size)
@@ -197,22 +261,27 @@ class FileTransferClient:
                             break
                         
                         self.secure_socket.sendall(bytes_read)
-                        
                         progress.update(len(bytes_read))
             
             final_response = self.secure_socket.recv(self.buffer_size).decode('utf-8').strip()
 
             if final_response == "UPLOAD_SUCCESS":
                 logging.info("File upload verified and saved successfully!")
+                return True
             else:
                 logging.error(f"Server reported an issue after transfer: {final_response}")
-            
+                return False
+                
         except Exception as e:
             logging.error(f"Error during file transfer: {e}", exc_info=True)
+            return False
     
     def handle_file_upload(self, cmd_key, file_path, recipient_username=None):
         if not os.path.isfile(file_path):
-            logging.error(f"File not found: {file_path}")
+            logging.error(f"Upload path not found: {file_path}")
+            return
+        elif file_path == "":
+            logging.error("File path must not be null. Enter a valid file path.")
             return
 
         file_size = os.path.getsize(file_path)
@@ -226,39 +295,64 @@ class FileTransferClient:
         status = parts[0]
 
         if status == self.config['RESPONSES']['READY_FOR_DATA']:
-            logging.info(f"Server ready. Transferring {file_name}...")
-            self.transfer_file(file_path)
+            server_offset = int(parts[1]) if len(parts) > 1 else 0
+            
+            if server_offset > 0:
+                logging.info(f"Resuming upload from {server_offset} bytes...")
+            else:
+                logging.info(f"Server ready. Transferring {file_name}...")
+                
+            self.transfer_file(file_path, server_offset)
         else:
-            logging.error(f"Server refused upload: {status}")        
-
-    def receive_file(self, full_file_path, file_size):
+            logging.error(f"Server refused upload: {status}")
+        
+    def receive_file(self, full_file_path, file_size, offset=0):
+        """
+        Receives bytes and appends to local file if offset > 0.
+        """
         try:
-            with open(full_file_path, "wb") as f:
-                with tqdm.tqdm(total=file_size, unit="B", unit_scale=True, 
-                            desc=f"Downloading {os.path.basename(full_file_path)}") as progress:
+            mode = "ab" if offset > 0 else "wb"
+            remaining = file_size - offset
+            
+            with open(full_file_path, mode) as f:
+                with tqdm.tqdm(total=file_size, initial=offset, unit="B", 
+                            unit_scale=True, desc=f"Downloading {os.path.basename(full_file_path)}") as progress:
+                    
                     bytes_received = 0
-                    while bytes_received < file_size:
-                        bytes_to_read = min(self.buffer_size, file_size - bytes_received)
-                        chunk = self.secure_socket.recv(bytes_to_read)
-                        if not chunk: break
+                    while bytes_received < remaining:
+                        to_read = min(self.buffer_size, remaining - bytes_received)
+                        chunk = self.secure_socket.recv(to_read)
+                        
+                        if not chunk: 
+                            break
+                            
                         f.write(chunk)
                         bytes_received += len(chunk)
                         progress.update(len(chunk))
             
-            return True
+            return (offset + bytes_received) == file_size
+
         except Exception as e:
-            logging.error(f"Download failed: {e}")
-            if os.path.exists(full_file_path): os.remove(full_file_path)
+            logging.error(f"Download interrupted, incomplete file saved for resumption: {e}")
             return False
         
     def handle_file_download(self, file_id, cmd_raw):
-        parts = self.send_command(cmd_raw, file_id)
+        offset = 0 
+        parts = self.send_command(cmd_raw, file_id, str(offset))
         status = parts[0]
 
         if status == self.config['RESPONSES']['DOWNLOAD_READY']:
-            filename, size = parts[1], int(parts[2])
+            filename, total_size = parts[1], int(parts[2])
             local_path = os.path.join(self.downloads_dir, filename)
-            self.receive_file(local_path, size)
+            
+            if os.path.exists(local_path):
+                offset = os.path.getsize(local_path)
+                if 0 < offset < total_size:
+                    parts = self.send_command(cmd_raw, file_id, str(offset))
+                    if parts[0] != self.config['RESPONSES']['DOWNLOAD_READY']:
+                        return logging.error("Resume request failed.")
+
+            self.receive_file(local_path, total_size, offset)
         else:
             logging.error(f"Download failed: {status}")
 
