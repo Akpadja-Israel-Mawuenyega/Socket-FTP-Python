@@ -51,7 +51,6 @@ class ClientHandler(threading.Thread):
                 parts = data.split(self.separator)
                 command = parts[0]
 
-                # --- 1. Session-less Commands (Register / Login) ---
                 if command == self.cmds['REGISTER']:
                     self.send_response(self.auth_handler.register_user(parts[1], parts[2]))
                     continue
@@ -64,23 +63,18 @@ class ClientHandler(threading.Thread):
                     self.send_response(response)
                     continue
 
-                # --- 2. Session Validation ---
-                # Check if session_id (parts[1]) is valid
-                # Extract session_id (should always be parts[1] after login)
                 session_id = parts[1] if len(parts) > 1 else None
 
                 if not session_id or not self.auth_handler.is_valid_session(session_id):
                     self.send_response(self.response['INVALID_SESSION'])
                     continue
 
-                # Update session data
                 session_data = self.auth_handler.get_session_data(session_id)
                 self.session_id = session_id
                 self.username = session_data['username']
                 self.user_role = session_data['role']
                 self.user_id = session_data['user_id']
                 
-                # --- 3. Authenticated Commands ---
                 
                 # LISTING
                 if command in [self.cmds['LIST_PRIVATE'], self.cmds['LIST_PUBLIC'], self.cmds['LIST_SHARED']]:
@@ -267,7 +261,6 @@ class ClientHandler(threading.Thread):
             self.send_response(self.response.get(response_key))
 
     def handle_file_status_change(self, file_id, cmd, target_user=None):
-        # 1. Fetch the sender's current record
         f = self.db_manager.get_file_record(file_id=file_id, owner_id=self.user_id)
         if not f: 
             return self.send_response(self.response['FILE_NOT_FOUND'])
@@ -277,14 +270,12 @@ class ClientHandler(threading.Thread):
             if not recipient:
                 return self.send_response(f"{self.response['ERROR']}{self.separator}Recipient not found.")
             
-            # Define paths
-            old_path = self.resolve_path(f) # Current private path
+            old_path = self.resolve_path(f) 
             
-            # Prepare metadata to calculate the recipient's new shared path
             recipient_metadata = {
                 'file_name': f['file_name'],
                 'is_public': False,
-                'recipient_id': recipient['id'] # Triggers shared_uploads path in resolve_path
+                'recipient_id': recipient['id'] 
             }
             new_path = self.resolve_path(recipient_metadata)
 
@@ -293,21 +284,16 @@ class ClientHandler(threading.Thread):
                 if os.path.exists(new_path):
                     return self.send_response(f"{self.response['ERROR']}{self.separator}Conflict.")
                 
-                # Physical Copy: Copy from sender private to recipient shared
                 shutil.copy2(old_path, new_path)
 
-                # 2. Add NEW record for the SENDER (The Copy)
-                # This replaces the one they are "giving up" to the recipient
                 self.db_manager.add_file_record(
                     owner_id=self.user_id,
                     file_name=f['file_name'], 
                     file_size=f['file_size'], 
                     is_public=False,
-                    recipient_id=None # Private to sender
+                    recipient_id=None
                 )
 
-                # 3. Update ORIGINAL record for the RECIPIENT
-                # Now the recipient owns this ID, and recipient_id matches owner_id
                 self.db_manager.update_file_record(
                     file_id=file_id, 
                     owner_id=recipient['id'], 
