@@ -131,9 +131,8 @@ class DatabaseManager:
                         params.append(owner_id)
 
                     if recipient_id is not None:
-                        query += " AND recipient_id = %s AND owner_id != %s"
+                        query += " AND recipient_id = %s"
                         params.append(recipient_id)
-                        params.append(recipient_id) 
                     elif exclude_recipient: 
                         query += " AND recipient_id IS NULL"
 
@@ -175,7 +174,7 @@ class DatabaseManager:
                     logging.error(f"Error fecthing file record: {e}")
                     return None                   
     
-    def update_file_record(self, file_id, owner_id, is_public=None, recipient_id=None):
+    def update_file_record(self, file_id, owner_id=None, is_public=None, recipient_id=None):
         updates = []
         params = []
 
@@ -183,6 +182,7 @@ class DatabaseManager:
             updates.append("is_public = %s")
             params.append(is_public)
         
+        # Allow recipient_id to be updated independently
         if recipient_id is not None:
             updates.append("recipient_id = %s")
             params.append(recipient_id)
@@ -204,7 +204,7 @@ class DatabaseManager:
                 except Exception as e:
                     logging.error(f"Database error updating file {file_id}: {e}")
                     return False
-                
+                    
     def update_user_record(self, user_id, username=None, password=None, session_id=None):
         """
         Generic user update. Dynamically builds the SET clause based on provided args.

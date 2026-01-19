@@ -88,7 +88,7 @@ class ClientHandler(threading.Thread):
 
                 # DOWNLOAD
                 elif command in [self.cmds['DOWNLOAD_PRIVATE'], self.cmds['DOWNLOAD_SHARED'], self.cmds['DOWNLOAD_PUBLIC']]:
-                    self.handle_file_download(parts[2])
+                    self.handle_file_download(parts[2], parts)
 
                 # UPLOAD
                 elif command in [self.cmds['UPLOAD_PRIVATE'], self.cmds['UPLOAD_PUBLIC'], self.cmds['UPLOAD_FOR_SHARING']]:
@@ -267,64 +267,59 @@ class ClientHandler(threading.Thread):
             self.send_response(self.response.get(response_key))
 
     def handle_file_status_change(self, file_id, cmd, target_user=None):
-        logging.info(f"DEBUG: cmd={cmd}, target={target_user}, file_id={file_id}")
+        # 1. Fetch the sender's current record
         f = self.db_manager.get_file_record(file_id=file_id, owner_id=self.user_id)
         if not f: 
             return self.send_response(self.response['FILE_NOT_FOUND'])
 
-        new_is_public = f['is_public']
-        new_recipient_id = f['recipient_id']
-        success_msg = ""
-
-        if cmd == self.cmds['MAKE_PUBLIC_USER']:
-            new_is_public = True
-            new_recipient_id = None
-            success_msg = self.response['USER_PUBLIC_SUCCESS']
-        elif cmd == self.cmds['MAKE_SHARED_USER'] and target_user:
+        if cmd == self.cmds['MAKE_SHARED_USER'] and target_user:
             recipient = self.db_manager.get_user_record(username=target_user)
             if not recipient:
                 return self.send_response(f"{self.response['ERROR']}{self.separator}Recipient not found.")
-            new_is_public = False
-            new_recipient_id = recipient['id']
-            success_msg = self.response['USER_SHARED_SUCCESS']
-        else:
-            return self.send_response(f"{self.response['ERROR']}{self.separator}Invalid action.")
-
-        old_path = self.resolve_path(f)
-        temp_f = f.copy()
-        temp_f['owner_id'] = new_recipient_id
-        temp_f['is_public'] = new_is_public
-        temp_f['recipient_id'] = new_recipient_id
-        new_path = self.resolve_path(temp_f)
-
-        if old_path == new_path:
-            return self.send_response(success_msg)
-
-        try:
-            os.makedirs(os.path.dirname(new_path), exist_ok=True)
-            if os.path.exists(new_path):
-                return self.send_response(f"{self.response['ERROR']}{self.separator}Conflict.")
             
-            shutil.copy2(old_path, new_path)
+            # Define paths
+            old_path = self.resolve_path(f) # Current private path
+            
+            # Prepare metadata to calculate the recipient's new shared path
+            recipient_metadata = {
+                'file_name': f['file_name'],
+                'is_public': False,
+                'recipient_id': recipient['id'] # Triggers shared_uploads path in resolve_path
+            }
+            new_path = self.resolve_path(recipient_metadata)
 
-            self.db_manager.add_file_record(
-                owner_id=self.user_id,
-                file_name=f['file_name'], 
-                file_size=f['file_size'], 
-                is_public=f['is_public']
-            )
+            try:
+                os.makedirs(os.path.dirname(new_path), exist_ok=True)
+                if os.path.exists(new_path):
+                    return self.send_response(f"{self.response['ERROR']}{self.separator}Conflict.")
+                
+                # Physical Copy: Copy from sender private to recipient shared
+                shutil.copy2(old_path, new_path)
 
-            self.db_manager.update_file_record(
-                file_id, 
-                owner_id=new_recipient_id, 
-                is_public=new_is_public, 
-                recipient_id=None
-            )
+                # 2. Add NEW record for the SENDER (The Copy)
+                # This replaces the one they are "giving up" to the recipient
+                self.db_manager.add_file_record(
+                    owner_id=self.user_id,
+                    file_name=f['file_name'], 
+                    file_size=f['file_size'], 
+                    is_public=False,
+                    recipient_id=None # Private to sender
+                )
 
-            self.send_response(success_msg)
-        except Exception as e:
-            logging.error(f"Status change failed: {e}")
-            self.send_response(f"{self.response['ERROR']}{self.separator}Storage operation failed.")
+                # 3. Update ORIGINAL record for the RECIPIENT
+                # Now the recipient owns this ID, and recipient_id matches owner_id
+                self.db_manager.update_file_record(
+                    file_id=file_id, 
+                    owner_id=recipient['id'], 
+                    is_public=False, 
+                    recipient_id=recipient['id']
+                )
+
+                return self.send_response(self.response['USER_SHARED_SUCCESS'])
+
+            except Exception as e:
+                logging.error(f"Status change failed: {e}")
+                return self.send_response(f"{self.response['ERROR']}{self.separator}Storage operation failed.")
 
     def resolve_path(self, record):
         if record.get('is_public'):
