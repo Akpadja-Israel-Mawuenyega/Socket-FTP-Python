@@ -175,7 +175,7 @@ class DatabaseManager:
                     logging.error(f"Error fecthing file record: {e}")
                     return None                   
     
-    def update_file_record(self, file_id, is_public=None, recipient_id=None):
+    def update_file_record(self, file_id, owner_id, is_public=None, recipient_id=None):
         updates = []
         params = []
 
@@ -186,6 +186,10 @@ class DatabaseManager:
         if recipient_id is not None:
             updates.append("recipient_id = %s")
             params.append(recipient_id)
+            
+        if owner_id is not None:
+            updates.append("owner_id = %s")
+            params.append(owner_id)    
 
         if not updates:
             return False

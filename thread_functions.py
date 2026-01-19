@@ -267,6 +267,7 @@ class ClientHandler(threading.Thread):
             self.send_response(self.response.get(response_key))
 
     def handle_file_status_change(self, file_id, cmd, target_user=None):
+        logging.info(f"DEBUG: cmd={cmd}, target={target_user}, file_id={file_id}")
         f = self.db_manager.get_file_record(file_id=file_id, owner_id=self.user_id)
         if not f: 
             return self.send_response(self.response['FILE_NOT_FOUND'])
@@ -291,6 +292,7 @@ class ClientHandler(threading.Thread):
 
         old_path = self.resolve_path(f)
         temp_f = f.copy()
+        temp_f['owner_id'] = new_recipient_id
         temp_f['is_public'] = new_is_public
         temp_f['recipient_id'] = new_recipient_id
         new_path = self.resolve_path(temp_f)
@@ -301,10 +303,24 @@ class ClientHandler(threading.Thread):
         try:
             os.makedirs(os.path.dirname(new_path), exist_ok=True)
             if os.path.exists(new_path):
-                return self.send_response(f"{self.response['ERROR']}{self.separator}File name conflict in destination.")
+                return self.send_response(f"{self.response['ERROR']}{self.separator}Conflict.")
             
-            shutil.move(old_path, new_path)
-            self.db_manager.update_file_record(file_id, is_public=new_is_public, recipient_id=new_recipient_id)
+            shutil.copy2(old_path, new_path)
+
+            self.db_manager.add_file_record(
+                owner_id=self.user_id,
+                file_name=f['file_name'], 
+                file_size=f['file_size'], 
+                is_public=f['is_public']
+            )
+
+            self.db_manager.update_file_record(
+                file_id, 
+                owner_id=new_recipient_id, 
+                is_public=new_is_public, 
+                recipient_id=None
+            )
+
             self.send_response(success_msg)
         except Exception as e:
             logging.error(f"Status change failed: {e}")
